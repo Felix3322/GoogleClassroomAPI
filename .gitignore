@@ -7,7 +7,7 @@ build/
 
 # Session cookies, OAuth secrets and local state must never be committed.
 cookies.txt
-gca-cookies.txt
+*cookies*.txt
 *.cookies
 *.sqlite3
 # OAuth client secret and the refresh-token document.

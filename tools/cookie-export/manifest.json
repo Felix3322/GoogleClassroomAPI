@@ -1,0 +1,10 @@
+{
+  "manifest_version": 3,
+  "name": "GoogleClassroomAPI cookie export (dev)",
+  "version": "1.0",
+  "description": "一键把当前浏览器的 Google 登录 Cookie 导出成 Netscape cookies.txt，供 GoogleClassroomAPI 的实测使用。只读你自己账号的 Cookie，不向任何服务器发送。",
+  "permissions": ["cookies", "downloads"],
+  "host_permissions": ["https://*.google.com/"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_title": "导出 Google 登录 Cookie 到 cookies.txt" }
+}

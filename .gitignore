@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# Session cookies, OAuth secrets and local state must never be committed.
+cookies.txt
+gca-cookies.txt
+*.cookies
+*.sqlite3
+# OAuth client secret and the refresh-token document.
+client_secret*.json
+token.json
+*.authorized_user.json

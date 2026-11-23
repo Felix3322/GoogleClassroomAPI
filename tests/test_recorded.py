@@ -969,3 +969,177 @@ def test_asking_for_an_item_the_class_does_not_have_is_a_lookup_error():
                             reply("pONvgf", '["hrsi.qr",[false]]'), reply("pONvgf", '["hrsi.qr",[false]]'))
     with pytest.raises(LookupError):
         Classroom(transcript.session()).item(COURSE, ITEM)
+
+
+# --- recorded: several accounts in one export ----------------------------------------------
+#
+# Read from the student's tab of the web app (account 3 of the browser): the page is
+# /u/3/h, the calls go to /u/3/_/ClassroomUi/data/batchexecute with source-path=/u/3/….
+
+def test_an_account_number_goes_into_every_address():
+    transcript = Transcript(BOOT, reply("ZZFlc", TOPICS))
+    ClassroomWeb(transcript.session(), account=3).list_topics(COURSE)
+    assert transcript.requests[0].url.path == "/u/3/h"
+    assert transcript.requests[1].url.path == "/u/3/_/ClassroomUi/data/batchexecute"
+    assert dict(transcript.requests[1].url.params)["source-path"] == "/u/3/h"
+
+
+def test_without_an_account_number_the_addresses_are_the_plain_ones():
+    transcript, web = classroom(reply("ZZFlc", TOPICS))
+    web.list_topics(COURSE)
+    assert transcript.requests[0].url.path == "/h"
+    assert transcript.requests[1].url.path == "/_/ClassroomUi/data/batchexecute"
+
+
+def test_an_account_number_nobody_is_signed_in_under_is_refused():
+    # Replayed with an export that had accounts 0, 2 and 3: /u/4/h answered 302 -> /u/0/h,
+    # i.e. Classroom silently serves account 0. The library must not carry on as account 0.
+    def play(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/u/4/h":
+            return httpx.Response(302, headers={"Location": "https://classroom.google.com/u/0/h"})
+        return httpx.Response(200, text=BOOT)
+    session = WebSession(client=httpx.Client(transport=httpx.MockTransport(play), follow_redirects=True))
+    with pytest.raises(WebProtocolError, match="/u/4/"):
+        ClassroomWeb(session, account=4).list_topics(COURSE)
+
+
+# --- recorded: the student's side, and returning work ---------------------------------------
+#
+# Requests captured on 2026-11-23 from the student's pages ("mark as done", "unsubmit",
+# answering a short-answer and a multiple-choice question) and from the teacher's student-work
+# page ("return" with the grade 8), and the replies the real server gave. Ids replaced by
+# same-length placeholders: student 444444444444, teacher 333333333333.
+
+# The page's client configuration carries the signed-in user's own Classroom id right after
+# the favicon address, once inside an escaped string and once plainly (real fragments, id replaced).
+BOOT_AS_STUDENT = BOOT + (
+    '<script>a = "[15,true,false,300000,10,\\"//ssl.gstatic.com/classroom/favicon.png\\",\\"444444444444\\",false,4000,1.3]";'
+    'b = [15,true,false,300000,10,"//ssl.gstatic.com/classroom/favicon.png","444444444444",false,4000,1.3];</script>')
+REF = '["444444444444",["222222222222",["111111111111"]]]'
+READ_MASK_TEXT = ('[null,1,null,1,1,null,1,1,1,null,null,null,1,null,[1],null,null,null,1,1,1,null,null,null,'
+                  '[[1,1]],[[1,1]],null,null,null,null,null,1]')
+SENT_REF = "[444444444444,[222222222222,[111111111111]]]"
+
+OWN_FRESH = ('["hrq.sub",[false],[[' + REF + ',null,1795397986268,null,null,4,null,["444444444444"],null,null,null,null,'
+             'null,0,null,null,[1],null,null,null,1,null,null,null,null,null,null,null,null,null,null,null,1]]]')
+OWN_FRESH_CHOICE = OWN_FRESH.replace(",[1],null,null,null,1,", ",[2],null,null,null,1,")
+TURNED_IN = ('["hrw.sub",[[' + REF + ',null,1795398037361,null,null,2,null,["444444444444"],null,null,null,null,null,0,'
+             'null,null,null,null,null,null,3,1795398037355,null,null,null,null,null,null,null,null,null,null,1]]]')
+UNSUBMITTED = ('["hrw.sub",[[' + REF + ',null,1795398065085,null,null,5,null,["444444444444"],null,null,null,null,null,0,'
+               'null,null,null,null,null,null,1,null,null,null,null,null,null,null,null,null,null,null,1]]]')
+SHORT_ANSWERED = ('["hrw.sub",[[' + REF + ',null,1795398116006,null,null,2,null,["444444444444"],null,null,null,null,null,'
+                  '0,null,null,[1,"GCA capture answer one"],null,null,null,3,1795398115997,null,null,null,null,null,null,'
+                  'null,null,null,null,1]]]')
+CHOICE_ANSWERED = ('["hrw.sub",[[' + REF + ',null,1795398156280,null,null,2,null,["444444444444"],null,null,null,null,null,'
+                   '0,null,null,[2,null,"2/4"],null,null,null,3,1795398156276,null,null,null,null,null,null,null,null,'
+                   'null,null,1]]]')
+RETURNED = ('["hrw.sub",[[' + REF + ',null,1795398486743,null,null,3,null,["444444444444"],8,8,null,null,null,0,null,null,'
+            'null,null,null,[[[4,1795398358424,["444444444444"],1,null,1],null,1],[[2,1795398360071,["444444444444"],3,'
+            'null,3],null,1],[[5,1795398360571,["444444444444"],9,null,1],null,1],[[2,1795398360914,["444444444444"],3,'
+            'null,3],null,1],[null,[8,10,1795398428659,["333333333333"],null,1,8],2],[null,[8,10,1795398486724,'
+            '["333333333333"],null,2,8],2]],8,1795398360914,null,null,null,null,null,null,null,null,null,null,1]]]')
+SUMMARY = ('["hrs.ssl",[[[0],["222222222222",["111111111111"]],2,[[["2/4",1],["2/3",0]],'
+           '["222222222222",["111111111111"]]]]]]')
+
+
+def sent(record: str, mask: str) -> str:
+    inner = "[[3],[[" + SENT_REF + "," + record + "," + mask + "]]," + READ_MASK_TEXT + "]"
+    return cw._dump([[["CVt8yf", inner, None, "generic"]]])
+
+
+NULLS = lambda n: ",".join(["null"] * n)  # noqa: E731
+
+
+def test_mark_as_done_equals_the_request_the_students_page_sent():
+    text = envelope("CVt8yf", cw.turn_in_arguments(COURSE, ITEM, STUDENT))
+    assert len(text) == 482, "the real request was 482 characters long"
+    assert text == sent("[" + SENT_REF + "," + NULLS(4) + ",2," + NULLS(26) + ",1]", "[1," + NULLS(11) + ",1]")
+
+
+def test_unsubmit_equals_the_request_the_students_page_sent():
+    assert envelope("CVt8yf", cw.unsubmit_arguments(COURSE, ITEM, STUDENT)) == sent(
+        "[" + SENT_REF + "," + NULLS(4) + ",5]", "[1]")
+
+
+def test_answers_equal_the_requests_the_question_pages_sent():
+    mask = "[1," + NULLS(6) + ",[1]," + NULLS(4) + ",1]"
+    assert envelope("CVt8yf", cw.answer_arguments(COURSE, ITEM, STUDENT, text="GCA capture answer one")) == sent(
+        "[" + SENT_REF + "," + NULLS(4) + ",2," + NULLS(10) + ',[null,"GCA capture answer one"],' + NULLS(15) + ",1]",
+        mask)
+    assert envelope("CVt8yf", cw.answer_arguments(COURSE, ITEM, STUDENT, choice="2/4")) == sent(
+        "[" + SENT_REF + "," + NULLS(4) + ",2," + NULLS(10) + ',[null,null,"2/4"],' + NULLS(15) + ",1]", mask)
+
+
+def test_return_equals_the_request_the_student_work_page_sent():
+    assert envelope("CVt8yf", cw.return_arguments(COURSE, ITEM, STUDENT, 8)) == sent(
+        "[" + SENT_REF + "," + NULLS(4) + ",3,null,null,8,8," + NULLS(22) + ",1]", "[1,null,1,1," + NULLS(8) + ",1]")
+
+
+def test_reading_ones_own_submission_equals_the_request_the_students_page_sent():
+    assert envelope("Zj93ge", cw.own_submission_arguments(COURSE, ITEM, STUDENT)) == (
+        '[[["Zj93ge","[[null,null,2,0],[null,1,null,null,1,null,1,1,1,null,null,null,1,null,[1],null,null,null,1,1,1,'
+        'null,null,null,[[1,1]],[[1,1]],null,null,null,null,null,1],[null,null,[' + SENT_REF + ']],1]",null,"generic"]]]')
+
+
+def student(*replies):
+    transcript = Transcript(BOOT_AS_STUDENT, *replies)
+    return transcript, ClassroomWeb(transcript.session(), account=3)
+
+
+def test_the_signed_in_users_own_id_is_read_from_the_page():
+    transcript, web = student()
+    assert web.own_user_id() == "444444444444"
+
+
+def test_recorded_replies_give_the_state_and_the_turn_in_time():
+    transcript, web = student(reply("Zj93ge", OWN_FRESH), reply("CVt8yf", TURNED_IN), reply("CVt8yf", UNSUBMITTED))
+    fresh = web.own_submission(COURSE, ITEM)
+    assert (fresh["state"], fresh["state_code"], fresh["answer_type"], fresh["answer"]) == ("assigned", 4, 1, None)
+    done = web.turn_in(COURSE, ITEM)
+    assert (done["state"], done["turned_in_ms"], done["student_id"]) == ("turned_in", 1795398037355, "444444444444")
+    back = web.unsubmit(COURSE, ITEM)
+    assert (back["state"], back["state_code"], back["turned_in_ms"]) == ("unsubmitted", 5, None)
+    assert json.loads(rpc_arguments_at(transcript, 1, "Zj93ge")) == cw.own_submission_arguments(COURSE, ITEM, STUDENT)
+
+
+def rpc_arguments_at(transcript: Transcript, index: int, rpc: str) -> str:
+    """Like rpc_arguments, for a session opened with account=3."""
+    request = transcript.requests[index]
+    assert request.url.path == "/u/3/_/ClassroomUi/data/batchexecute"
+    (((name, arguments, _nothing, _kind),),) = json.loads(transcript.form(index)["f.req"])
+    assert name == rpc
+    return arguments
+
+
+def test_recorded_replies_give_the_answers():
+    transcript, web = student(reply("CVt8yf", SHORT_ANSWERED), reply("CVt8yf", CHOICE_ANSWERED))
+    short = web.answer_question(COURSE, ITEM, text="GCA capture answer one")
+    assert (short["answer"], short["answer_type"], short["state"]) == ("GCA capture answer one", 1, "turned_in")
+    choice = web.answer_question(COURSE, ITEM, choice="2/4")
+    assert (choice["answer"], choice["answer_type"]) == ("2/4", 2)
+
+
+def test_the_recorded_reply_to_a_return_carries_the_grade_the_student_sees():
+    transcript, web = classroom(reply("CVt8yf", RETURNED))
+    record = web.return_work(COURSE, ITEM, STUDENT, 8)
+    assert (record["state"], record["state_code"], record["grade"], record["draft_grade"]) == ("returned", 3, 8, 8)
+    assert [(g["grade"], g["max_points"], g["returned"]) for g in record["grade_history"]] == [
+        (8, 10, False), (8, 10, True)]
+
+
+def test_the_recorded_summary_counts_the_picks_per_choice():
+    transcript, web = classroom(reply("yMOiof", SUMMARY))
+    assert web.question_summary(COURSE, ITEM) == {"2/4": 1, "2/3": 0}
+    assert rpc_arguments(transcript, 1, "yMOiof") == "[[null,null,1,0],[[222222222222,[111111111111]]]]"
+
+
+def test_a_choice_that_is_not_offered_is_refused_before_anything_is_sent():
+    # Replayed: the real server stored "not a choice" as the picked choice and marked the
+    # question turned in. So the facade checks the answer against the question's choices.
+    from google_classroom_api import Classroom
+    question = [5, None, None, [listed_item(ITEM, "GCA choice question", [2]), [None], [2, None, [["2/4", "2/3"]]]]]
+    transcript = Transcript(BOOT_AS_STUDENT, reply("Zj93ge", OWN_FRESH_CHOICE), reply("ZZFlc", '["hrt.qr",null,[]]'),
+                            reply("dpT4Vd", json.dumps(["hrcw.qr", [False], [question]])))
+    with pytest.raises(ValueError, match="not one of the choices"):
+        Classroom(transcript.session(), account=3).answer_question(COURSE, ITEM, "not a choice")
+    assert len(transcript.requests) == 4, "page, own submission, topics, one section: no write"

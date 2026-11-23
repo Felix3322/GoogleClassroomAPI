@@ -80,6 +80,11 @@ _SUBMISSION_MASK = [None, 1, None, None, 1, None, 1, 1, 1, None, None, None, 1, 
                     None, 1, 1, 1, None, None, None, [[1, 1]], [[1, 1]], None, None, None, None, None, 1]
 
 _WIZ_KEYS = {"at": "SNlM0e", "sid": "FdrFJe", "build": "cfb2h"}
+#: WIZ_global_data key that holds the signed-in account's e-mail address (read from real pages).
+_WIZ_EMAIL_KEY = "oPEP7c"
+# The signed-in user's own Classroom user id sits in the page's client configuration, right
+# after the favicon address (read from real teacher and student pages; quotes may be escaped).
+_OWN_ID_PATTERN = re.compile(r'classroom/favicon\.png\\?",\\?"(\d+)\\?"')
 
 
 def _dump(value: Any) -> str:
@@ -379,15 +384,103 @@ def draft_grade_arguments(course_id: int, item_id: int, student_id: int, grade: 
     return [[3], [[ref, record, _GRADE_WRITE_MASK]], _GRADE_READ_MASK]
 
 
+# --- a student's own work ----------------------------------------------------------------
+#
+# What the student's pages sent (captured 2026-11-23). All of it is CVt8yf, the same call a
+# gradebook cell uses, on the student's own submission record:
+#   "mark as done"            slot 5 = 2,           write mask [1, null×11, 1]
+#   answer a question         slot 5 = 2 and the answer in slot 16, mask [1, null×6, [1], null×4, 1]
+#       short answer   [null, "text"]         multiple choice   [null, null, "the choice"]
+#   "unsubmit"                the record cut after slot 5 = 5, mask [1]
+# Slot 32 of the record is 1 in every turn-in, as it is in every record read back.
+
+SUBMISSION_TURNED_IN = 2
+SUBMISSION_RETURNED = 3
+SUBMISSION_ASSIGNED = 4
+SUBMISSION_UNSUBMITTED = 5
+#: Names for the state code in slot 5 of a submission record. All four were observed.
+SUBMISSION_STATES = {SUBMISSION_TURNED_IN: "turned_in", SUBMISSION_RETURNED: "returned",
+                     SUBMISSION_ASSIGNED: "assigned", SUBMISSION_UNSUBMITTED: "unsubmitted"}
+#: Slot of the grade the student can see (set when work is returned); slot 9 is the teacher's draft.
+SUBMISSION_GRADE_SLOT = 8
+SUBMISSION_ANSWER_SLOT = 16
+SUBMISSION_TURNED_IN_AT_SLOT = 21
+
+_TURN_IN_MASK = [1] + [None] * 11 + [1]
+_ANSWER_MASK = [1] + [None] * 6 + [[1]] + [None] * 4 + [1]
+_UNSUBMIT_MASK = [1]
+# The teacher's "return": slot 5 = 3 and the grade in both slot 8 and slot 9.
+_RETURN_MASK = [1, None, 1, 1] + [None] * 8 + [1]
+
+
+def _turned_in_record(ref: list, answer: Optional[list] = None) -> list:
+    record: list = [ref] + [None] * 32
+    record[5] = SUBMISSION_TURNED_IN
+    record[SUBMISSION_ANSWER_SLOT] = answer
+    record[32] = 1
+    return record
+
+
+def turn_in_arguments(course_id: int, item_id: int, student_id: int) -> list:
+    """CVt8yf arguments of the student's "mark as done"."""
+    ref = submission_ref(course_id, item_id, student_id)
+    return [[3], [[ref, _turned_in_record(ref), _TURN_IN_MASK]], _GRADE_READ_MASK]
+
+
+def answer_arguments(course_id: int, item_id: int, student_id: int, *, text: Optional[str] = None,
+                     choice: Optional[str] = None) -> list:
+    """CVt8yf arguments that answer a question and turn the answer in."""
+    if (text is None) == (choice is None):
+        raise ValueError("give either text (short answer) or choice (multiple choice)")
+    ref = submission_ref(course_id, item_id, student_id)
+    answer = [None, text] if choice is None else [None, None, choice]
+    return [[3], [[ref, _turned_in_record(ref, answer), _ANSWER_MASK]], _GRADE_READ_MASK]
+
+
+def unsubmit_arguments(course_id: int, item_id: int, student_id: int) -> list:
+    """CVt8yf arguments of the student's "unsubmit"."""
+    ref = submission_ref(course_id, item_id, student_id)
+    return [[3], [[ref, [ref, None, None, None, None, SUBMISSION_UNSUBMITTED], _UNSUBMIT_MASK]],
+            _GRADE_READ_MASK]
+
+
+def return_arguments(course_id: int, item_id: int, student_id: int, grade: Optional[float]) -> list:
+    """CVt8yf arguments of the teacher's "return", as the student-work page sent them.
+
+    The grade goes out twice: as the grade the student gets (slot 8) and as
+    the draft (slot 9). ``None`` returns the work ungraded.
+    """
+    ref = submission_ref(course_id, item_id, student_id)
+    record: list = [ref] + [None] * 32
+    record[5] = SUBMISSION_RETURNED
+    record[SUBMISSION_GRADE_SLOT] = grade
+    record[SUBMISSION_DRAFT_GRADE_SLOT] = grade
+    record[32] = 1
+    return [[3], [[ref, record, _RETURN_MASK]], _GRADE_READ_MASK]
+
+
+def own_submission_arguments(course_id: int, item_id: int, student_id: int) -> list:
+    """Zj93ge arguments the student's page sends to read its own submission of one item."""
+    return [[None, None, 2, 0], _SUBMISSION_MASK,
+            [None, None, [submission_ref(course_id, item_id, student_id)]], 1]
+
+
 def parse_submission(record: list) -> dict:
     """One submission record as plain fields.
 
-    Layout read from records the real server returned for a student whose work
-    had only a teacher's draft grade: slot 0 the reference, 2 the last update,
-    5 a state code, 9 the draft grade, 19 the history. The state code was ``4``
-    in every record seen; what other values mean (turned in, returned) has not
-    been observed, so it is passed through as a number. The whole record is kept
-    under ``raw``.
+    Layout read from records the real server returned: slot 0 the reference,
+    2 the last update, 5 the state, 8 the grade the student got when the work
+    was returned, 9 the teacher's draft grade, 16 the answer to a question,
+    19 the history (teachers only), 21 when it was turned in.
+
+    ``state`` is the name of the state code (:data:`SUBMISSION_STATES`:
+    assigned, turned in, returned, unsubmitted), ``None`` for a code never
+    seen; the code itself is in ``state_code``. A record appears a second or
+    two after the work is published to a student.
+
+    ``answer`` is the text of a short answer or the picked choice;
+    ``answer_type`` is 1 for a short-answer question, 2 for multiple choice,
+    ``None`` for an assignment. The whole record is kept under ``raw``.
     """
     try:
         ref = record[0]
@@ -397,12 +490,26 @@ def parse_submission(record: list) -> dict:
             change = entry[1] if len(entry) > 1 else None
             if change:
                 grades.append({"grade": change[0], "max_points": change[1], "time_ms": change[2],
-                               "by_user_id": str(change[3][0]) if change[3] else None})
+                               "by_user_id": str(change[3][0]) if change[3] else None,
+                               # 1 where a draft grade was typed, 2 where work was returned with it
+                               "returned": len(change) > 5 and change[5] == 2})
+        block = record[SUBMISSION_ANSWER_SLOT] if len(record) > SUBMISSION_ANSWER_SLOT else None
+        answer_type = block[0] if block else None
+        answer = None
+        if block and answer_type == QUESTION_SHORT_ANSWER and len(block) > 1:
+            answer = block[1]
+        elif block and answer_type == QUESTION_MULTIPLE_CHOICE and len(block) > 2:
+            answer = block[2]
         return {
             "student_id": str(ref[0]),
             "item_id": str(ref[1][0]),
             "updated_ms": record[2],
+            "state": SUBMISSION_STATES.get(record[5]),
             "state_code": record[5],
+            "turned_in_ms": record[SUBMISSION_TURNED_IN_AT_SLOT] if len(record) > SUBMISSION_TURNED_IN_AT_SLOT else None,
+            "answer": answer,
+            "answer_type": answer_type,
+            "grade": record[SUBMISSION_GRADE_SLOT] if len(record) > SUBMISSION_GRADE_SLOT else None,
             "draft_grade": record[SUBMISSION_DRAFT_GRADE_SLOT] if len(record) > SUBMISSION_DRAFT_GRADE_SLOT else None,
             "grade_history": grades,
             "raw": record,
@@ -503,31 +610,62 @@ def parse_batchexecute(text: str, rpc_id: str) -> Any:
 
 
 class ClassroomWeb:
-    def __init__(self, session: WebSession, *, language: str = "en") -> None:
+    """The private Classroom calls, as one of the accounts the cookies are signed in to.
+
+    A browser profile can be signed in to several Google accounts at once, and
+    an export from it carries all of them; the web app tells them apart by the
+    ``/u/<n>/`` part of its URLs. ``account`` is that number. Without it the
+    URLs have no such part and Google uses the default account, number 0
+    (replayed: an export with accounts 0, 2 and 3 acted as 0).
+    """
+
+    def __init__(self, session: WebSession, *, language: str = "en", account: Optional[int] = None) -> None:
         self._s = session
         self._language = language
+        self._prefix = "" if account is None else f"/u/{int(account)}"
         self._wiz: Optional[dict] = None
 
     def _boot(self) -> dict:
         if self._wiz is None:
-            response = self._s.get(f"{HOST}/h")
+            response = self._s.get(f"{HOST}{self._prefix}/h")
             if response.status_code != 200:
                 raise WebProtocolError(f"cannot open Classroom: HTTP {response.status_code}")
+            # Replayed: an account number nobody is signed in under is redirected to
+            # account 0 instead of being refused. Acting as the wrong account must not happen.
+            if self._prefix and not response.url.path.startswith(self._prefix + "/"):
+                raise WebProtocolError(
+                    f"the cookies have no account under {self._prefix}/ (Classroom answered from "
+                    f"{response.url.path}); check the number in the web app's address bar")
             wiz = {}
             for name, key in _WIZ_KEYS.items():
                 match = re.search(r'"%s":"([^"]+)"' % key, response.text)
                 if not match:
                     raise WebProtocolError(f"Classroom page has no {key}; is the session signed in?")
                 wiz[name] = match.group(1)
+            email = re.search(r'"%s":"([^"]+)"' % _WIZ_EMAIL_KEY, response.text)
+            wiz["email"] = email.group(1) if email else None
+            own_id = _OWN_ID_PATTERN.search(response.text)
+            wiz["user_id"] = own_id.group(1) if own_id else None
             self._wiz = wiz
         return self._wiz
+
+    def signed_in_email(self) -> Optional[str]:
+        """The e-mail address of the account this session acts as (from the page's own data)."""
+        return self._boot()["email"]
+
+    def own_user_id(self) -> str:
+        """The Classroom user id of the account this session acts as (from the page's own data)."""
+        user_id = self._boot()["user_id"]
+        if not user_id:
+            raise WebProtocolError("the Classroom page no longer shows the signed-in user's id where it did")
+        return user_id
 
     def call(self, rpc_id: str, arguments: Any, *, source_path: str = "/h") -> Any:
         """One ``batchexecute`` call. Replayed by hand for reads and writes."""
         wiz = self._boot()
         params = {
             "rpcids": rpc_id,
-            "source-path": source_path,
+            "source-path": self._prefix + source_path,
             "f.sid": wiz["sid"],
             "bl": wiz["build"],
             "hl": self._language,
@@ -539,7 +677,7 @@ class ClassroomWeb:
         }
         envelope = [[[rpc_id, _dump(arguments), None, "generic"]]]
         response = self._s.post(
-            f"{HOST}/_/ClassroomUi/data/batchexecute",
+            f"{HOST}{self._prefix}/_/ClassroomUi/data/batchexecute",
             params=params,
             data={"f.req": _dump(envelope), "at": wiz["at"]},
             headers={"X-Same-Domain": "1"},
@@ -840,6 +978,59 @@ class ClassroomWeb:
             return parse_submission(result[1][0])
         except (IndexError, TypeError) as exc:
             raise WebProtocolError(f"unexpected grade reply: {exc!r}") from exc
+
+    def return_work(self, course_id: int, item_id: int, student_id: int, grade: Optional[float]) -> dict:
+        """As the teacher: return one student's work, with a grade or (``None``) without. Replayed.
+
+        Returning is what makes a grade visible to the student. Returns the
+        submission record the server answers with.
+        """
+        return self._write_submission(return_arguments(course_id, item_id, int(student_id), grade))
+
+    # --- the student's side ---------------------------------------------------------
+
+    def _write_submission(self, arguments: list) -> dict:
+        result = self.call("CVt8yf", arguments)
+        try:
+            return parse_submission(result[1][0])
+        except (IndexError, TypeError) as exc:
+            raise WebProtocolError(f"unexpected submission reply: {exc!r}") from exc
+
+    def own_submission(self, course_id: int, item_id: int) -> dict:
+        """As a student: your own submission record of one item. Replayed."""
+        result = self.call("Zj93ge", own_submission_arguments(course_id, item_id, int(self.own_user_id())))
+        records = result[2] if len(result) > 2 and result[2] else []
+        if not records:
+            raise WebProtocolError(f"item {item_id} has no submission for the signed-in user (not a student "
+                                   "of it, not published, or published less than a couple of seconds ago)")
+        return parse_submission(records[0])
+
+    def turn_in(self, course_id: int, item_id: int) -> dict:
+        """As a student: mark an assignment as done. Replayed."""
+        return self._write_submission(turn_in_arguments(course_id, item_id, int(self.own_user_id())))
+
+    def unsubmit(self, course_id: int, item_id: int) -> dict:
+        """As a student: take turned-in work back. Replayed."""
+        return self._write_submission(unsubmit_arguments(course_id, item_id, int(self.own_user_id())))
+
+    def answer_question(self, course_id: int, item_id: int, *, text: Optional[str] = None,
+                        choice: Optional[str] = None) -> dict:
+        """As a student: answer a question and turn the answer in. Replayed."""
+        return self._write_submission(
+            answer_arguments(course_id, item_id, int(self.own_user_id()), text=text, choice=choice))
+
+    def question_summary(self, course_id: int, item_id: int) -> dict:
+        """How many students picked each choice of a multiple-choice question (yMOiof).
+
+        Captured from the student's page after answering: the reply is
+        ``["hrs.ssl", [[[0], itemRef, 2, [[[choice, count], …], itemRef]]]]``.
+        """
+        result = self.call("yMOiof", [[None, None, 1, 0], [[int(item_id), [int(course_id)]]]])
+        try:
+            rows = result[1][0][3][0] if result[1] and len(result[1][0]) > 3 and result[1][0][3] else []
+            return {choice: count for choice, count in rows}
+        except (IndexError, TypeError, ValueError) as exc:
+            raise WebProtocolError(f"unexpected question summary: {exc!r}") from exc
 
     # --- class settings -------------------------------------------------------------
 

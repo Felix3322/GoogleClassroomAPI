@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "GoogleClassroomAPI"
-version = "0.2.0"
+version = "0.3.0"
 description = "Run Google Classroom the way a teacher thinks about it — courses, students, topics, assignments — using only the teacher's browser cookies."
 readme = "README.md"
 requires-python = ">=3.10"

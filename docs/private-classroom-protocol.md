@@ -48,11 +48,12 @@ IDs are decimal strings. The course URL `/c/{x}` is the base64 of the course id.
 | `lkA1wb` | `hrt.ur` | create topic | `[[[null,[courseId]],"topic name"],[1,1,1]]` |
 | `WRrP0b` | | rename topic | `[[["topicId",[courseId]],"new name"],[1],[1,1,1]]` |
 | `EjPfY` | | delete topic | `[["topicId",[courseId]]]` |
-| `CVt8yf` | `hrw.sub` | write a draft grade | see "Submissions and draft grades" |
+| `CVt8yf` | `hrw.sub` | write a submission record: draft grade, return, turn in, answer, unsubmit | see "Submissions" |
+| `yMOiof` | `hrs.ssl` | tally of the answers to a multiple-choice question | see "Submissions" |
 | `o5pSDe` | | sent by the People page; **not the roster** — it returned `[]` for a class that has a student (probably pending invitations) | `[[courseId],100,null,[1,null,1]]` |
 | `UG41I` | `hrq.usr` | user profiles (name, email, photo) by user id | see "Roster" |
 | `dpT4Vd` | `hrcw.qr` | list classwork, one section at a time | see "Listing classwork" |
-| `Zj93ge` | `hrq.sub` | student submissions of one assignment (the gradebook calls it per assignment) | see "Submissions" |
+| `Zj93ge` | `hrq.sub` | submission records of one item (the gradebook calls it per item; a student gets their own) | see "Submissions" |
 | `pONvgf` | | published classwork for the gradebook | `[[10,null,1,0], masks…, [[[2],[[courseId]],[2,5],[2]]]]` |
 | `sLc6hf` | `hrq.cmt` | comments | `[[100,null,1,0], mask, [[null,null,[2,3]],[[itemId,[courseId]]],null,null,[[2]]]]` |
 | `cCzVwf` | `hra.laa` | add-on attachments of an item | `[[100,null,1,0],null, mask, [[itemId,[courseId]]]]` |
@@ -224,39 +225,89 @@ multiple-choice question, and the reverse). Only the type counts:
 type cannot be told from the id, the library sends the short-answer form and,
 if that is refused, the multiple-choice form.
 
-## Submissions and draft grades
+## Submissions: reading, grading, turning in, returning
 
-The gradebook calls `Zj93ge` once per assignment:
+Every student has one **submission record** per published assignment or
+question. It appears a second or two after the item is published (replayed:
+none 0.2 s after publishing, there at 1.8 s). One call writes it for everybody
+— `CVt8yf` — and what a caller may change depends on who they are.
+
+### Reading
+
+The gradebook calls `Zj93ge` once per item:
 `[[100,null,1,0], mask, [null,[[itemId,[courseId]]]], 0]` (mask in
-`web/classroom.py`). The reply is `["hrq.sub", [hasMore], [record, …]]`; the
-third element is missing when no student has a record. A student gets a record
-only once something happened to their work — a student who was merely assigned
-the work is absent (the gradebook shows "assigned").
-
-Typing a number into a gradebook cell sends `CVt8yf`:
-
-```
-[[3], [[ref, record, [null,null,null,1]]], readMask]
-ref    = [studentId, [itemId, [courseId]]]
-record = [ref, null×8, draftGrade]        # set   (the grade is slot 9)
-record = [ref]                            # clear (emptying the cell)
-```
-
-and is answered with `["hrw.sub", [record]]`. A record, as returned after a
-draft grade was set to 7, changed to 8 and cleared:
+`web/classroom.py`), answered `["hrq.sub", [hasMore], [record, …]]`; the third
+element is missing when there is no record. A teacher gets every student's
+record; a student calling the same thing gets only their own (replayed). The
+student's own pages ask for one record by its reference instead:
+`[[null,null,2,0], mask, [null,null,[[studentId,[itemId,[courseId]]]]], 1]`.
 
 | Slot | Meaning |
 |---|---|
-| `0` | `[studentId, [itemId, [courseId]]]` |
+| `0` | `[studentId, [itemId, [courseId]]]`, the record's reference |
 | `2` | last update, ms |
-| `5` | a state code; `4` in every record seen (work with a teacher's draft grade, never turned in). Other values not observed |
+| `5` | state: `4` assigned, `2` turned in, `5` unsubmitted by the student, `3` returned by the teacher (all four observed) |
 | `7` | `[studentId]` |
-| `9` | draft grade, or null |
-| `19` | history: `[[state, ms, [actorId], 1, null, 5], null, 1]` for a state change, `[null, [grade, maxPoints, ms, [actorId], null, 1, n], 2]` for each grade change (grade null when cleared) |
+| `8` | the grade the student sees; set when the work is returned |
+| `9` | the teacher's draft grade (a student reading their own record gets null here) |
+| `16` | for a question: `[1]` short answer / `[2]` multiple choice before answering, then `[1, "text"]` / `[2, null, "choice"]` |
+| `19` | history, teachers only: `[[state, ms, [actorId], n, null, n], null, 1]` per state change, `[null, [grade, maxPoints, ms, [actorId], null, kind, n], 2]` per grade change — `kind` 1 for a typed draft grade, 2 for a grade returned to the student; grade null when cleared |
+| `21` | when it was turned in, ms |
+| `32` | `1` in every record seen |
 
-Not seen: a record of work that was opened, turned in or returned, and where
-the returned ("assigned") grade sits. Returning work was not captured — it
-notifies the student.
+### Writing
+
+```
+CVt8yf  [[3], [[ref, record, writeMask]], readMask]      ->  ["hrw.sub", [record]]
+ref = [studentId, [itemId, [courseId]]]
+```
+
+| Who, what | `record` (33 slots unless cut) | `writeMask` |
+|---|---|---|
+| teacher types a draft grade | `[ref, null×8, grade]` | `[null,null,null,1]` |
+| teacher empties the cell | `[ref]` | `[null,null,null,1]` |
+| teacher returns work | slot 5 = `3`, slots 8 and 9 = the grade (both null to return ungraded), slot 32 = `1` | `[1,null,1,1,null×8,1]` |
+| student marks as done | slot 5 = `2`, slot 32 = `1` | `[1,null×11,1]` |
+| student answers a question | slot 5 = `2`, slot 16 = `[null,"text"]` or `[null,null,"choice"]`, slot 32 = `1` | `[1,null×6,[1],null×4,1]` |
+| student unsubmits | `[ref, null×4, 5]` | `[1]` |
+
+All six were captured from the web app, the library's requests equal them
+character for character, and all were replayed outside a browser with the
+result read back from the other side (the teacher saw each state and answer;
+the student saw the returned grade and did not see the draft).
+
+Replayed as well:
+
+* The teacher sending the student's "mark as done" is refused (`CVt8yf`
+  answers with error `[3]`); the record stays "assigned".
+* The server does **not** check a multiple-choice answer against the choices:
+  it stored `"not a choice"` and marked the question turned in. The library's
+  `Classroom.answer_question` checks it first.
+* After work was returned the student can turn it in again (state back to `2`).
+
+After answering a multiple-choice question the page asks for the tally:
+`yMOiof [[null,null,1,0],[[itemId,[courseId]]]]` ->
+`["hrs.ssl", [[[0], itemRef, 2, [[["choice", count], …], itemRef]]]]`.
+It answers teachers too.
+
+## Several accounts in one browser
+
+A browser profile signed in to several Google accounts sends the same cookies
+for all of them, so an export carries all of them. The web app tells them
+apart by a number in the path: the page is `/u/<n>/h` and the calls go to
+`/u/<n>/_/ClassroomUi/data/batchexecute` with `source-path=/u/<n>/…` (read from
+a tab of account 3). Replayed with an export holding accounts 0, 2 and 3:
+
+* no number at all, the form the library used from the start, is account 0;
+* `/u/3/` acted as account 3 (a student of the test class);
+* a number nobody is signed in under (`/u/4/h`) answers `302 -> /u/0/h`, i.e.
+  falls back to account 0 without saying so — the library checks where the
+  page was served from and refuses;
+* a signed-out slot (`/u/1/`) redirects to the sign-in page.
+
+The page's `WIZ_global_data` has the account's e-mail address under `oPEP7c`;
+the user's own Classroom id sits in the client configuration right after the
+favicon address (`…classroom/favicon.png","<userId>",false,…`).
 
 ## Stream item kinds
 
@@ -367,9 +418,11 @@ two students.
 ## Not captured yet
 
 * Assigning to individual students (see above) — needs two students.
-* Submission records of work that was opened, turned in or returned, and
-  returning work — needs a student who turns work in.
-* Students' answers to a question, and the question composer's three checkboxes.
+* What a student attaches to an assignment before turning it in (files, links, new documents),
+  and private comments on a submission.
+* The question composer's three checkboxes, and students replying to each other's answers.
+* Returning the work of several students in one call (the web app's list of
+  `[ref, record, mask]` entries has only ever been seen with one).
 * Quiz assignments, grade import, marking a single piece of work as missing or done.
 * The other class settings in the same record (overall grade calculation, grade categories, stream options).
 * Drive file attachments other than Forms, and how Classroom shares them.

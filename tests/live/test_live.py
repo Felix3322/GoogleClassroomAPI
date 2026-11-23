@@ -44,6 +44,9 @@ COURSE_ID = os.environ.get("GCA_LIVE_COURSE_ID")
 WEB_FORMS = os.environ.get("GCA_WEB_FORMS") == "1"
 # Publishing notifies the students of the class, so those tests are opt-in.
 PUBLISH = os.environ.get("GCA_LIVE_PUBLISH") == "1"
+# The teacher-and-student loop needs a test student signed in in the same browser: the number
+# of that account in the web app's address bar (classroom.google.com/u/<n>/).
+STUDENT_ACCOUNT = os.environ.get("GCA_LIVE_STUDENT_ACCOUNT")
 
 pytestmark = pytest.mark.skipif(not COOKIES, reason="set GCA_COOKIE_FILE to run against real Google")
 
@@ -375,3 +378,93 @@ class TestClassroom:
         for draft in drafts.values():
             with pytest.raises(LookupError):
                 cls.item(course, draft["item_id"])
+
+
+@pytest.mark.skipif(not (COURSE_ID and PUBLISH and STUDENT_ACCOUNT),
+                    reason="set GCA_LIVE_COURSE_ID, GCA_LIVE_PUBLISH=1 and GCA_LIVE_STUDENT_ACCOUNT=<n> "
+                           "(a test student of that class, signed in in the same browser)")
+class TestTeacherAndStudent:
+    """The whole loop on the real server: the teacher publishes, the student does the work,
+    the teacher reads it and returns it with a grade, the student sees the grade."""
+
+    @pytest.fixture()
+    def pair(self, session):
+        from google_classroom_api import Classroom
+        teacher = Classroom(session)
+        student = Classroom(WebSession.from_cookie_file(COOKIES), account=int(STUDENT_ACCOUNT))
+        assert student.me()["user_id"] in {s["user_id"] for s in teacher.students(int(COURSE_ID))}
+        assert student.me()["email"] != teacher.me()["email"]
+        return teacher, student
+
+    @staticmethod
+    def wait_for_record(teacher, item_id):
+        for _ in range(10):  # the student's record appears a second or two after publishing
+            if teacher.submissions(int(COURSE_ID), item_id):
+                return
+            time.sleep(1)
+        raise AssertionError("no submission record appeared")
+
+    def test_assignment_is_turned_in_taken_back_and_returned_with_a_grade(self, pair):
+        teacher, student = pair
+        course, sid = int(COURSE_ID), student.me()["user_id"]
+        item = teacher.create_assignment(course, f"gca live loop {int(time.time())}", points=10)["item_id"]
+
+        def seen():
+            return next(s for s in teacher.submissions(course, item) if s["student_id"] == sid)
+        try:
+            self.wait_for_record(teacher, item)
+            assert student.my_submission(course, item)["state"] == "assigned"
+            assert student.turn_in(course, item)["state"] == "turned_in" and seen()["state"] == "turned_in"
+            assert student.unsubmit(course, item)["state"] == "unsubmitted" and seen()["state"] == "unsubmitted"
+            assert student.turn_in(course, item)["turned_in_ms"]
+
+            teacher.set_draft_grade(course, item, sid, 7)
+            assert student.my_submission(course, item)["grade"] is None, "a draft grade is the teacher's only"
+            returned = teacher.return_work(course, item, sid)
+            assert (returned["state"], returned["grade"]) == ("returned", 7)
+            mine = student.my_submission(course, item)
+            assert (mine["state"], mine["grade"]) == ("returned", 7)
+        finally:
+            teacher.delete_assignment(course, item)
+
+    def test_answers_to_both_kinds_of_question_reach_the_teacher(self, pair):
+        teacher, student = pair
+        course, sid, stamp = int(COURSE_ID), student.me()["user_id"], int(time.time())
+        short = teacher.create_question(course, f"gca live loop short {stamp}", points=5)["item_id"]
+        choice = teacher.create_question(course, f"gca live loop choice {stamp}", choices=["2/4", "2/3"],
+                                         points=5)["item_id"]
+        try:
+            self.wait_for_record(teacher, choice)
+            assert student.answer_question(course, short, "A sentence.")["answer"] == "A sentence."
+            with pytest.raises(ValueError):
+                student.answer_question(course, choice, "not offered")
+            assert student.my_submission(course, choice)["state"] == "assigned"
+            assert student.answer_question(course, choice, "2/3")["answer"] == "2/3"
+
+            answers = {q: next(s for s in teacher.submissions(course, q) if s["student_id"] == sid)
+                       for q in (short, choice)}
+            assert (answers[short]["answer"], answers[short]["state"]) == ("A sentence.", "turned_in")
+            assert (answers[choice]["answer"], answers[choice]["answer_type"]) == ("2/3", 2)
+            assert teacher.question_summary(course, choice) == {"2/4": 0, "2/3": 1}
+            assert teacher.return_work(course, short, sid, grade=4)["grade"] == 4
+            assert student.my_submission(course, short)["grade"] == 4
+        finally:
+            teacher.delete_question(course, short)
+            teacher.delete_question(course, choice)
+
+    def test_the_teacher_cannot_turn_work_in_for_the_student(self, pair):
+        teacher, student = pair
+        course, sid = int(COURSE_ID), student.me()["user_id"]
+        item = teacher.create_assignment(course, f"gca live loop refusal {int(time.time())}", points=1)["item_id"]
+        try:
+            self.wait_for_record(teacher, item)
+            with pytest.raises(WebProtocolError):
+                teacher._c._write_submission(cw.turn_in_arguments(course, int(item), int(sid)))
+            assert student.my_submission(course, item)["state"] == "assigned"
+        finally:
+            teacher.delete_assignment(course, item)
+
+    def test_an_account_number_nobody_is_signed_in_under_is_refused(self, session):
+        from google_classroom_api import Classroom
+        with pytest.raises(WebProtocolError):
+            Classroom(WebSession.from_cookie_file(COOKIES), account=9).courses()

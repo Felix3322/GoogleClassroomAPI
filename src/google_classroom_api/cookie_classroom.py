@@ -7,13 +7,14 @@ Google Cloud project — just the teacher's exported cookies. It runs headless:
 no browser is involved at run time.
 
 How far each method has been verified against the real servers is listed in
-the README. Two things are still missing and raise instead of guessing:
+the README. One thing is still missing and raises instead of guessing:
+assigning to *named* students — the web app expresses it only when a class has
+at least two students, and the test class had one, so the request has not been
+captured.
 
-* assigning to *named* students — the web app expresses it only when a class
-  has at least two students, and the test class had one, so the request has
-  not been captured;
-* what a submission looks like once a student has turned work in or had it
-  returned — only records carrying a teacher's draft grade have been seen.
+The object acts as one signed-in account. Opened as a teacher it creates,
+publishes, grades and returns work; opened as a student (``account=<n>`` of a
+student signed in in the same browser) it turns work in and answers questions.
 
 Ids are returned as strings; every method accepts them as strings or ints.
 """
@@ -42,13 +43,23 @@ UNCHANGED: Any = _Unchanged()
 
 
 class Classroom:
-    def __init__(self, session: WebSession, *, language: str = "en") -> None:
-        self._c = ClassroomWeb(session, language=language)
+    def __init__(self, session: WebSession, *, language: str = "en", account: Optional[int] = None) -> None:
+        self._c = ClassroomWeb(session, language=language, account=account)
 
     @classmethod
     def from_cookie_file(cls, path: str, **kwargs) -> "Classroom":
-        """Open with a Netscape ``cookies.txt`` exported from the teacher's browser."""
+        """Open with a Netscape ``cookies.txt`` exported from the browser.
+
+        If that browser is signed in to several Google accounts, the file holds
+        all of them. ``account=<n>`` picks one: it is the number in the web
+        app's address bar, ``classroom.google.com/u/<n>/…``. Without it the
+        default account (number 0) is used. :meth:`me` tells which one you got.
+        """
         return cls(WebSession.from_cookie_file(path), **kwargs)
+
+    def me(self) -> dict:
+        """``{email, user_id}`` of the account this object acts as."""
+        return {"email": self._c.signed_in_email(), "user_id": self._c.own_user_id()}
 
     # --- courses ------------------------------------------------------------------
 
@@ -367,9 +378,13 @@ class Classroom:
     def submissions(self, course_id: Id, item_id: Id) -> list[dict]:
         """Submission records of one assignment.
 
-        ``[{student_id, item_id, updated_ms, state_code, draft_grade,
-        grade_history, raw}]``. A student appears only once something happened
-        to their work; students who were merely assigned it have no record.
+        ``[{student_id, item_id, state, state_code, updated_ms, turned_in_ms,
+        answer, answer_type, grade, draft_grade, grade_history, raw}]``.
+        ``state`` is ``"assigned"``, ``"turned_in"``, ``"returned"`` or
+        ``"unsubmitted"``; ``answer`` is a student's answer to a question;
+        ``grade`` is what the student sees (set by :meth:`return_work`),
+        ``draft_grade`` what only teachers see. Every student the work was
+        published to has a record.
         """
         return self._c.list_submissions(course_id, item_id)
 
@@ -384,6 +399,61 @@ class Classroom:
     def clear_draft_grade(self, course_id: Id, item_id: Id, student_id: Id) -> dict:
         """Remove one student's draft grade."""
         return self._c.set_draft_grade(course_id, item_id, int(student_id), None)
+
+    def return_work(self, course_id: Id, item_id: Id, student_id: Id, grade: Any = UNCHANGED) -> dict:
+        """Return one student's work. This is what shows the grade to the student.
+
+        Without ``grade`` the student's current draft grade is returned (or no
+        grade, if there is none); ``grade=<number>`` sets and returns that
+        grade; ``grade=None`` returns the work ungraded. Returns the
+        submission, now ``state == "returned"``.
+        """
+        if grade is UNCHANGED:
+            current = [s for s in self._c.list_submissions(course_id, item_id)
+                       if s["student_id"] == str(student_id)]
+            if not current:
+                raise LookupError(f"student {student_id} has no submission of item {item_id}")
+            grade = current[0]["draft_grade"]
+        return self._c.return_work(course_id, item_id, int(student_id), grade)
+
+    # --- as a student ---------------------------------------------------------------
+    #
+    # These act on the signed-in account's own work, so open the object with a
+    # student's cookies (or with ``account=<n>`` of a student).
+
+    def my_submission(self, course_id: Id, item_id: Id) -> dict:
+        """Your own submission of one assignment or question (fields as in :meth:`submissions`)."""
+        return self._c.own_submission(course_id, item_id)
+
+    def turn_in(self, course_id: Id, item_id: Id) -> dict:
+        """Mark an assignment as done. Returns your submission, now ``state == "turned_in"``."""
+        return self._c.turn_in(course_id, item_id)
+
+    def unsubmit(self, course_id: Id, item_id: Id) -> dict:
+        """Take turned-in work back. Returns your submission, now ``state == "unsubmitted"``."""
+        return self._c.unsubmit(course_id, item_id)
+
+    def answer_question(self, course_id: Id, item_id: Id, answer: str) -> dict:
+        """Answer a question and turn the answer in.
+
+        ``answer`` is the text for a short-answer question, or one of the
+        choices for a multiple-choice one; which of the two the question is, is
+        read from your submission record first.
+        """
+        mine = self._c.own_submission(course_id, item_id)
+        if mine["answer_type"] == 2:
+            # Replayed: the server stores any text as the picked choice, so check it here.
+            choices = self.item(course_id, item_id).get("choices") or []
+            if answer not in choices:
+                raise ValueError(f"{answer!r} is not one of the choices {choices}")
+            return self._c.answer_question(course_id, item_id, choice=answer)
+        if mine["answer_type"] == 1:
+            return self._c.answer_question(course_id, item_id, text=answer)
+        raise ValueError(f"item {item_id} is not a question")
+
+    def question_summary(self, course_id: Id, item_id: Id) -> dict:
+        """``{choice: number of students who picked it}`` for a multiple-choice question."""
+        return self._c.question_summary(course_id, item_id)
 
 
 __all__ = ["Classroom", "UNCHANGED", "course_id_from_url"]

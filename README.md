@@ -1,6 +1,7 @@
 # GoogleClassroomAPI
 
 用 Python 按老师的思路操作 Google Classroom:课程、学生、主题、作业、提问、资料、公告、评分。
+也能以学生的身份交作业和答题,所以"老师发布 → 学生完成 → 老师读到答案 → 发还成绩"这一整圈可以全程用代码跑。
 
 **只需要老师浏览器里导出的 Cookie**:不用 OAuth 客户端,不用 Google Cloud 项目,运行时也不需要浏览器。
 Google 网页端内部的协议(RPC 编号、位置数组、字段掩码、会话参数)都封装在库里。
@@ -9,7 +10,7 @@ Google 网页端内部的协议(RPC 编号、位置数组、字段掩码、会�
 > Google 没有为它们提供文档,也不承诺兼容,随时可能失效;自动化调用也可能不符合 Google 的服务条款。
 > 请先用测试账号和测试班级,风险自担。本项目与 Google 无关。
 
-**目录**:[配置](#配置) · [使用](#使用) · [返回值速查](#返回值速查) · [出错时](#出错时) ·
+**目录**:[配置](#配置) · [使用](#使用) · [学生这一侧](#学生这一侧和完整的一轮) · [返回值速查](#返回值速查) · [出错时](#出错时) ·
 [验证到什么程度](#验证到什么程度) · [还没做的](#还没做的以及原因) · [测试](#测试)
 
 ## 配置
@@ -64,8 +65,9 @@ Google 的登录 Cookie 网页脚本读不到,只能用浏览器扩展导出。�
 
 扩展装一次就行,以后每次重新导出只需要第 3、4 两步。
 
-> 如果这个 Chrome 同时登录了好几个 Google 账号:库访问的是不带账号序号的地址,按 Google 的规则会落到默认(第一个登录的)账号上。
-> 多账号的情况没有实测过,建议用一个只登录了老师账号的 Chrome 个人资料来导出。
+> **这个 Chrome 同时登录了好几个 Google 账号时**,导出的文件里包含所有这些账号。库默认用 0 号账号;
+> 要用别的账号,打开时传 `account=<序号>`,序号就是该账号的 Classroom 地址栏里 `/u/` 后面的数字
+> (`classroom.google.com/u/3/…` 就是 3)。`cls.me()` 会告诉你现在用的是谁;序号对不上时库会报错,不会悄悄换成 0 号账号。
 
 ### 第 4 步:确认配置好了
 
@@ -217,19 +219,60 @@ for row in cls.classwork(course):        # 作业、提问、资料,连同草稿
     print(row["kind"], row["title"], status, row["points"], row["due"])
 ```
 
-### 评分
+### 评分和发还
 
 ```python
 quiz = cls.create_assignment(course, "随堂小测", points=10)        # 不写 publish=False:直接发布
 student = cls.students(course)[0]["user_id"]
 
 cls.set_draft_grade(course, quiz["item_id"], student, 8)          # 草稿分:只有老师看得到
-cls.submissions(course, quiz["item_id"])                          # [{"student_id": "…", "draft_grade": 8, "grade_history": […], …}]
-cls.clear_draft_grade(course, quiz["item_id"], student)
+cls.return_work(course, quiz["item_id"], student)                 # 发还:学生这时才看到 8 分
+for s in cls.submissions(course, quiz["item_id"]):
+    print(s["student_id"], s["state"], s["grade"], s["draft_grade"])   # … returned 8 8
 cls.delete_assignment(course, quiz["item_id"])
 ```
 
-目前只支持老师单方面的**草稿分**。把作业发还给学生、写正式成绩,以及学生交了作业之后的记录,都还没做。
+`return_work(..., grade=9)` 可以一步完成打分和发还;`grade=None` 是不给分数直接发还。
+`clear_draft_grade` 清掉还没发还的草稿分。
+
+### 学生这一侧,和完整的一轮
+
+同一个导出文件里如果还登录着一个学生账号,就可以让库以学生的身份交作业、答题。下面假设学生是 3 号账号:
+
+```python
+import time
+
+teacher = Classroom.from_cookie_file("gca-cookies.txt")               # 默认的 0 号账号:老师
+student = Classroom.from_cookie_file("gca-cookies.txt", account=3)    # 3 号账号:学生
+student.me()                                                          # {"email": "…", "user_id": "…"}
+
+hw = teacher.create_assignment(course, "闭环示例 作业", points=10)
+ask = teacher.create_question(course, "闭环示例 1/2 和哪个相等?", choices=["2/4", "2/3"], points=5)
+time.sleep(3)                                                # 学生的提交记录在发布后一两秒才出现
+
+student.my_submission(course, hw["item_id"])["state"]        # "assigned"
+student.turn_in(course, hw["item_id"])                       # 标记为已完成
+student.unsubmit(course, hw["item_id"])                      # 取消提交
+student.turn_in(course, hw["item_id"])                       # 再交一次
+student.answer_question(course, ask["item_id"], "2/4")       # 答题并上交;简答题就传一段文字
+
+for s in teacher.submissions(course, ask["item_id"]):        # 老师读到每个学生的状态和答案
+    print(s["student_id"], s["state"], s["answer"])          # … turned_in 2/4
+teacher.question_summary(course, ask["item_id"])             # {"2/4": 1, "2/3": 0}
+
+me = student.me()["user_id"]
+teacher.return_work(course, hw["item_id"], me, grade=9)      # 发还并给 9 分
+student.my_submission(course, hw["item_id"])["grade"]        # 9
+
+teacher.delete_assignment(course, hw["item_id"])
+teacher.delete_question(course, ask["item_id"])
+```
+
+几点说明:
+
+- 学生端的方法只对"自己的"作业起作用。实测老师替学生交作业会被服务器拒绝。
+- 服务器不检查单选题的答案是不是选项之一(实测随便一段文字都会被存下来),所以 `answer_question` 会先核对,不在选项里就报错。
+- 学生现在只能"标记为已完成"和答题;往作业里加附件再上交还没做。
 
 ### 缺交作业的默认成绩
 
@@ -248,19 +291,30 @@ cls.set_missing_work_grade(course, enabled=before["enabled"], percent=before["pe
 | `topics()` / `ensure_topic()` | `{"topic_id", "name", "updated_ms"}` |
 | `create_*()` / `update_*()` / `publish()` | `{"item_id", "course_id", "title", "state"}` |
 | `classwork()` / `assignments()` / `questions()` / `materials()` / `announcements()` / `item()` | `{"item_id", "kind", "title", "text", "state", "topic_id", "points", "due", "due_has_time", "attachment_ids"}`,提问另有 `"choices"` |
-| `submissions()` | `{"student_id", "item_id", "updated_ms", "state_code", "draft_grade", "grade_history", "raw"}` |
+| `submissions()` / `my_submission()` / `turn_in()` / `unsubmit()` / `answer_question()` / `return_work()` / `set_draft_grade()` | 提交记录:`{"student_id", "item_id", "state", "state_code", "updated_ms", "turned_in_ms", "answer", "answer_type", "grade", "draft_grade", "grade_history", "raw"}` |
+| `question_summary()` | `{选项: 选它的人数}` |
+| `me()` | `{"email", "user_id"}` |
 | `missing_work_grade()` | `{"enabled", "percent"}` |
 
 字段含义:
+
+条目(作业、提问、资料、公告):
 
 - `state`:`2` 已发布,`3` 草稿。
 - `kind`:`"assignment"` 作业、`"question"` 提问、`"material"` 资料、`"announcement"` 公告。
 - `text`:作业和提问的说明、资料的描述、公告的正文。公告没有标题,`title` 是空字符串。
 - `due`:带时区(UTC)的 `datetime`,没有截止日期时是 `None`;`points` 是满分。资料和公告没有这两项,为 `None`。
 - `attachment_ids`:附件的 id 列表。目前只能读到 id,读不到附件指向的链接。
-- `grade_history`:`[{"grade", "max_points", "time_ms", "by_user_id"}]`,每改一次草稿分多一条。
-- `state_code`:服务器给的提交状态码,原样透传。目前只见过 `4`(老师打过草稿分、学生没交),其他取值的含义还不知道。
-- `submissions()` 里只有"发生过什么"的学生;仅仅被布置了作业、什么都没做的学生不在里面。
+
+提交记录(每个学生对每份已发布的作业或提问各有一条,发布后一两秒出现):
+
+- `state`:`"assigned"` 已布置、`"turned_in"` 已上交、`"unsubmitted"` 学生取消了提交、`"returned"` 老师已发还。
+  `state_code` 是服务器的原始编号(依次是 4、2、5、3)。
+- `answer`:学生对提问的回答(简答题是文字,单选题是选中的选项),作业为 `None`;`answer_type` 是 `1` 简答 / `2` 单选。
+- `grade`:学生看得到的成绩,发还时才有;`draft_grade`:老师的草稿分,学生读自己的记录时这一项是 `None`。
+- `turned_in_ms`:上交时间(毫秒时间戳)。
+- `grade_history`:`[{"grade", "max_points", "time_ms", "by_user_id", "returned"}]`,只有老师读得到;
+  `returned` 为真的那一条是随发还一起给出的成绩。
 
 ## 出错时
 
@@ -281,10 +335,10 @@ except WebProtocolError:
 |---|---|
 | `ReauthRequired` | Cookie 过期或不完整,被 Google 重定向去登录 |
 | `StreamItemRejected` | 新建 / 修改 / 删除被服务器拒绝。Classroom 这时照样返回 HTTP 200,只在回复里带一个错误状态;库会检查它,不会把被拒绝的操作报告成成功 |
-| `WebProtocolError` | 回复的格式和预期不符;表单链接不被认作表单;一个分区里超过 100 条(翻页还没做)。`StreamItemRejected` 是它的子类 |
+| `WebProtocolError` | 回复的格式和预期不符;表单链接不被认作表单;一个分区里超过 100 条(翻页还没做);`account=` 的序号下没有登录的账号;替别人交作业。`StreamItemRejected` 是它的子类 |
 | `LookupError` | `item()` / `update_*()` / `publish()` 找不到这个 id(不存在或已删除) |
 | `NotImplementedError` | 用了 `student_ids`(只发给指定学生,还没做) |
-| `ValueError` | 截止时间没带时区;或者拿作业的 id 去调 `update_question` 之类 |
+| `ValueError` | 截止时间没带时区;拿作业的 id 去调 `update_question` 之类;单选题的答案不在选项里 |
 
 前三个都继承自 `ClassroomAPIError`,想一网打尽可以只捕获它。
 
@@ -306,6 +360,10 @@ except WebProtocolError:
 | 公告:新建、修改、发布、列出草稿和已发布的、删除 | `create_announcement` / `update_announcement` / `publish` / `announcements` / `delete_announcement` | 真机验证 |
 | 列出课业(含草稿、分值、截止日期、附件 id),读单条 | `classwork` / `assignments` / `questions` / `materials` / `item` | 真机验证 |
 | 草稿分:打分 / 读回 / 清空 | `set_draft_grade` / `submissions` / `clear_draft_grade` | 真机验证 |
+| 发还作业:带分数 / 沿用草稿分 / 不给分数 | `return_work` | 真机验证 |
+| 读每个学生的提交状态、对提问的回答、选项统计 | `submissions` / `question_summary` | 真机验证 |
+| 学生端:读自己的提交、标记完成、取消提交、答简答题和单选题 | `my_submission` / `turn_in` / `unsubmit` / `answer_question` | 真机验证 |
+| 从导出文件里选用某一个账号 | `account=` / `me` | 真机验证 |
 | 缺交作业默认成绩 开 / 关 / 百分比 | `missing_work_grade` / `set_missing_work_grade` | 真机验证 |
 | 写入被服务器拒绝时报错 | `StreamItemRejected` | 真机验证 |
 | **只发给指定学生** | `create_assignment(student_ids=...)` | **未完成**,调用会报错而不会误发给全班 |
@@ -316,8 +374,8 @@ except WebProtocolError:
 
 - **只发给指定学生。** Classroom 网页端只有在班里至少有两个学生时才能表达"只发给其中几个";
   测试班只有一个学生,这个请求还没抓到。
-- **学生交作业之后的事。** 测试班的学生还没提交过作业,所以"已提交 / 已发还"的记录长什么样、
-  发还作业和正式成绩怎么写、学生对提问的回答怎么读,都还没见过。目前只支持老师单方面的草稿分。
+- **学生往作业里加附件再上交**(文件、链接、新建文档),以及提交上的私下评论。
+- **一次发还多名学生。** 现在一次调用发还一名学生。
 - **提问编辑器里的三个勾选项**(学生可以互相回复 / 可以修改答案 / 可以看全班汇总)保持默认,还不能改。
 - **Google 表单以外的云端硬盘附件**(文档、幻灯片、上传的文件)还没试过。
 - **翻页。** 一个主题分区、信息流、提交记录各自超过 100 条时库会报错,而不是悄悄只返回前 100 条。
@@ -349,12 +407,13 @@ $env:GCA_COOKIE_FILE="gca-cookies.txt"; $env:GCA_LIVE_COURSE_ID="<测试班的�
 ```
 
 真机测试默认只在测试班里新建草稿(学生看不到)并随后删除、读写缺交成绩设置后恢复原值,会留下一个名为 `cfb live topic` 的主题;
-测试班需要至少一名学生,草稿分那一项还需要一份已发布的作业(没有就跳过)。另外两个可选的环境变量:
+测试班需要至少一名学生,草稿分那一项还需要一份已发布的作业(没有就跳过)。另外几个可选的环境变量:
 
 | 环境变量 | 作用 |
 |---|---|
 | `GCA_LIVE_FORM_ID=<表单的文件 id>` | 连"附表单"一起验证 |
 | `GCA_LIVE_PUBLISH=1` | 连"发布"一起验证。**会真的通知班里的学生**,只在没有真实学生的测试班里开 |
+| `GCA_LIVE_STUDENT_ACCOUNT=<序号>` | 再加上 `-k "TestClassroom or TestTeacherAndStudent"`,跑"老师发布 → 学生完成 → 老师发还"的整圈。需要同一个浏览器里登录着测试班的一名测试学生,序号是他的 Classroom 地址栏里 `/u/` 后面的数字;同时要开 `GCA_LIVE_PUBLISH=1` |
 
 ## 许可
 

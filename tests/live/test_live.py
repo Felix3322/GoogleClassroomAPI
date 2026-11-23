@@ -452,6 +452,50 @@ class TestTeacherAndStudent:
             teacher.delete_question(course, short)
             teacher.delete_question(course, choice)
 
+    def test_the_student_attaches_a_link_and_a_new_doc_and_the_teacher_reads_them(self, pair):
+        """Leaves one empty Google Doc in the test student's Drive."""
+        teacher, student = pair
+        course, sid = int(COURSE_ID), student.me()["user_id"]
+        item = teacher.create_assignment(course, f"gca live attach {int(time.time())}", points=10)["item_id"]
+        try:
+            self.wait_for_record(teacher, item)
+            student.add_link(course, item, "https://example.com/live-link")
+            both = student.add_new_doc(course, item)["attachments"]
+            assert [a["kind"] for a in both] == ["link", "drive_file"]
+            assert both[0]["url"] == "https://example.com/live-link" and both[1]["drive_id"]
+
+            left = student.remove_attachment(course, item, both[0]["attachment_id"])["attachments"]
+            assert [a["attachment_id"] for a in left] == [both[1]["attachment_id"]]
+            assert student.turn_in(course, item)["state"] == "turned_in"
+
+            seen = next(s for s in teacher.submissions(course, item) if s["student_id"] == sid)
+            assert seen["state"] == "turned_in"
+            assert [(a["kind"], a["drive_id"]) for a in seen["attachments"]] == [("drive_file", both[1]["drive_id"])]
+            assert "docs.google.com/document" in seen["attachments"][0]["url"]
+        finally:
+            teacher.delete_assignment(course, item)
+
+    def test_a_file_already_in_the_students_drive_is_attached_by_its_id(self, pair):
+        """Leaves one empty Google Doc in the test student's Drive."""
+        teacher, student = pair
+        course, stamp = int(COURSE_ID), int(time.time())
+        first = teacher.create_assignment(course, f"gca live drive a {stamp}", points=1)["item_id"]
+        second = teacher.create_assignment(course, f"gca live drive b {stamp}", points=1)["item_id"]
+        try:
+            self.wait_for_record(teacher, second)
+            doc = student.add_new_doc(course, first)["attachments"][0]     # never turned in: still the student's
+            attached = student.add_drive_file(course, second, doc["drive_id"])["attachments"]
+            assert [(a["kind"], a["drive_id"]) for a in attached] == [("drive_file", doc["drive_id"])]
+            assert attached[0]["title"] and attached[0]["mime_type"]
+            assert student.my_submission(course, second)["attachments"][0]["drive_id"] == doc["drive_id"]
+
+            assert student.turn_in(course, second)["state"] == "turned_in"
+            with pytest.raises(WebProtocolError):                           # no more attachments once turned in
+                student.add_link(course, second, "https://example.com/late")
+        finally:
+            teacher.delete_assignment(course, first)
+            teacher.delete_assignment(course, second)
+
     def test_the_teacher_cannot_turn_work_in_for_the_student(self, pair):
         teacher, student = pair
         course, sid = int(COURSE_ID), student.me()["user_id"]

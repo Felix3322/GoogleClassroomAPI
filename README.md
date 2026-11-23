@@ -95,10 +95,12 @@ deleted:  True
   不要提交进任何仓库(本仓库的 `.gitignore` 已经排除了 `*cookies*.txt`)。
 - 想让一份已经导出的文件作废:在浏览器里退出这个 Google 账号。按 Google 的机制,退出会让这次登录的 Cookie 一并失效
   (这一点本项目没有专门实测过)。
-- **导出的 Cookie 会自己过期。** 实测有一份导出后大约两小时就失效了,而当时浏览器里的账号仍然是登录状态
-  (浏览器会不断换新的会话令牌,导出的快照跟不上)。过期后库会抛出 `ReauthRequired`,重新导出一份(点一下扩展)即可。
-- 库里有一个按浏览器的做法去换新令牌的 `WebSession.renew()`,但**它能不能延长导出 Cookie 的寿命还没有结论**
-  (请求服务器是接受的,延寿效果的对照实验还没跑完),所以默认不开,现在请不要依赖它。
+- **导出的 Cookie 大约两小时后失效**,而浏览器里的账号仍然是登录状态(浏览器会不断换新的会话令牌,导出的快照跟不上)。
+  实测过两份:一份是用了大约两小时后发现失效;另一份每 10 分钟检查一次,导出后约 113 分钟时还能用,约 123 分钟时已经失效。
+  失效后库会抛出 `ReauthRequired`,重新导出一份(点一下扩展)即可。
+- **没有办法在浏览器之外给它续期。** 对照实验:同一份导出复制成两份,一份每 10 分钟按浏览器的做法请求一次新令牌
+  (`WebSession.renew()`),另一份从不续。失效之前续了 12 次,请求都被接受,但一次新令牌也没发下来,两份在同一次检查时都已失效。
+  所以需要长时间运行的程序,只能定期重新导出。`renew()` 和 `renew_every=` 仍留在库里,但不要指望它们。
 
 ## 使用
 
@@ -253,11 +255,15 @@ time.sleep(3)                                                # 学生的提交�
 student.my_submission(course, hw["item_id"])["state"]        # "assigned"
 student.turn_in(course, hw["item_id"])                       # 标记为已完成
 student.unsubmit(course, hw["item_id"])                      # 取消提交
-student.turn_in(course, hw["item_id"])                       # 再交一次
+student.add_link(course, hw["item_id"], "https://example.com/my-work")     # 交之前可以先加附件:链接
+student.add_new_doc(course, hw["item_id"])                                # 或让 Classroom 在学生的云端硬盘里新建一份文档
+student.turn_in(course, hw["item_id"])                       # 再交一次,附件随提交记录一起
 student.answer_question(course, ask["item_id"], "2/4")       # 答题并上交;简答题就传一段文字
 
 for s in teacher.submissions(course, ask["item_id"]):        # 老师读到每个学生的状态和答案
     print(s["student_id"], s["state"], s["answer"])          # … turned_in 2/4
+for s in teacher.submissions(course, hw["item_id"]):         # 以及学生交上来的附件
+    print([(a["kind"], a["title"], a["url"]) for a in s["attachments"]])
 teacher.question_summary(course, ask["item_id"])             # {"2/4": 1, "2/3": 0}
 
 me = student.me()["user_id"]
@@ -272,7 +278,12 @@ teacher.delete_question(course, ask["item_id"])
 
 - 学生端的方法只对"自己的"作业起作用。实测老师替学生交作业会被服务器拒绝。
 - 服务器不检查单选题的答案是不是选项之一(实测随便一段文字都会被存下来),所以 `answer_question` 会先核对,不在选项里就报错。
-- 学生现在只能"标记为已完成"和答题;往作业里加附件再上交还没做。
+- 学生可以加的附件:链接(`add_link`)、新建的 Google 文档(`add_new_doc`)、云端硬盘里已有的文件(`add_drive_file`,传文件 id)。
+  `remove_attachment` 按附件 id 移除。从电脑上传文件还没做。
+- 附件要在上交之前加:实测交了之后再加会被服务器拒绝,先 `unsubmit` 才行。
+- `add_drive_file` 只能加学生自己还能编辑的文件;已经随别的作业交上去的文件实测会被拒绝。
+- 老师在学生上交之前就能读到他已经加上的附件。
+- 每次调 `add_new_doc` 都会在学生的云端硬盘里真的新建一份文档;删除作业不会删掉它。
 
 ### 缺交作业的默认成绩
 
@@ -291,7 +302,7 @@ cls.set_missing_work_grade(course, enabled=before["enabled"], percent=before["pe
 | `topics()` / `ensure_topic()` | `{"topic_id", "name", "updated_ms"}` |
 | `create_*()` / `update_*()` / `publish()` | `{"item_id", "course_id", "title", "state"}` |
 | `classwork()` / `assignments()` / `questions()` / `materials()` / `announcements()` / `item()` | `{"item_id", "kind", "title", "text", "state", "topic_id", "points", "due", "due_has_time", "attachment_ids"}`,提问另有 `"choices"` |
-| `submissions()` / `my_submission()` / `turn_in()` / `unsubmit()` / `answer_question()` / `return_work()` / `set_draft_grade()` | 提交记录:`{"student_id", "item_id", "state", "state_code", "updated_ms", "turned_in_ms", "answer", "answer_type", "grade", "draft_grade", "grade_history", "raw"}` |
+| `submissions()` / `my_submission()` / `turn_in()` / `unsubmit()` / `answer_question()` / `return_work()` / `set_draft_grade()` | 提交记录:`{"student_id", "item_id", "state", "state_code", "updated_ms", "turned_in_ms", "answer", "answer_type", "attachments", "grade", "draft_grade", "grade_history", "raw"}` |
 | `question_summary()` | `{选项: 选它的人数}` |
 | `me()` | `{"email", "user_id"}` |
 | `missing_work_grade()` | `{"enabled", "percent"}` |
@@ -314,6 +325,8 @@ cls.set_missing_work_grade(course, enabled=before["enabled"], percent=before["pe
 - `answer`:学生对提问的回答(简答题是文字,单选题是选中的选项),作业为 `None`;`answer_type` 是 `1` 简答 / `2` 单选。
 - `grade`:学生看得到的成绩,发还时才有;`draft_grade`:老师的草稿分,学生读自己的记录时这一项是 `None`。
 - `turned_in_ms`:上交时间(毫秒时间戳)。
+- `attachments`:学生加的附件,`[{"attachment_id", "kind", "title", "url", "drive_id", "mime_type"}]`;
+  `kind` 是 `"link"` 或 `"drive_file"`,链接没有 `drive_id`。老师和学生本人都读得到。
 - `grade_history`:`[{"grade", "max_points", "time_ms", "by_user_id", "returned"}]`,只有老师读得到;
   `returned` 为真的那一条是随发还一起给出的成绩。
 
@@ -364,6 +377,7 @@ except WebProtocolError:
 | 发还作业:带分数 / 沿用草稿分 / 不给分数 | `return_work` | 真机验证 |
 | 读每个学生的提交状态、对提问的回答、选项统计 | `submissions` / `question_summary` | 真机验证 |
 | 学生端:读自己的提交、标记完成、取消提交、答简答题和单选题 | `my_submission` / `turn_in` / `unsubmit` / `answer_question` | 真机验证 |
+| 学生端:加链接、新建文档、加云端硬盘文件、移除附件;老师读到学生的附件 | `add_link` / `add_new_doc` / `add_drive_file` / `remove_attachment` / `submissions` | 真机验证 |
 | 从导出文件里选用某一个账号 | `account=` / `me` | 真机验证 |
 | 缺交作业默认成绩 开 / 关 / 百分比 | `missing_work_grade` / `set_missing_work_grade` | 真机验证 |
 | 写入被服务器拒绝时报错 | `StreamItemRejected` | 真机验证 |
@@ -375,12 +389,12 @@ except WebProtocolError:
 
 - **只发给指定学生。** Classroom 网页端只有在班里至少有两个学生时才能表达"只发给其中几个";
   测试班只有一个学生,这个请求还没抓到。
-- **学生往作业里加附件再上交**(文件、链接、新建文档),以及提交上的私下评论。
+- **学生从电脑上传文件**作为附件,新建幻灯片 / 表格 / 绘图,以及提交上的私下评论。
 - **一次发还多名学生。** 现在一次调用发还一名学生。
 - **提问编辑器里的三个勾选项**(学生可以互相回复 / 可以修改答案 / 可以看全班汇总)保持默认,还不能改。
 - **Google 表单以外的云端硬盘附件**(文档、幻灯片、上传的文件)还没试过。
 - **翻页。** 一个主题分区、信息流、提交记录各自超过 100 条时库会报错,而不是悄悄只返回前 100 条。
-- **会话续期能不能让导出的 Cookie 活得更久,还没有结论。** 见上面"Cookie 的保管和有效期"。
+- **导出的 Cookie 无法续期**(实测,见上面"Cookie 的保管和有效期"),长时间运行只能定期重新导出。
 - **Google 表单的内容。** Google 把 Docs/Forms 的编辑会话绑定在设备上,导出的 Cookie 在浏览器之外无法编辑表单、
   也读不到学生的作答(把现成的表单附到作业上不受此限,因为那走的是 Classroom)。表单部分以后补;
   仓库里 `forms.py` / `formbuilder.py` / `oauth_backends.py` 是为此保留的官方 API 代码,当前对外接口不依赖它们。

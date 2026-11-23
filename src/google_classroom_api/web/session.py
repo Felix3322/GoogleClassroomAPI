@@ -44,11 +44,15 @@ class WebSession:
 
     Google keeps a browser signed in by handing it a fresh short-lived token
     (``__Secure-1PSIDTS``) every few minutes; an exported snapshot does not get
-    those and was seen to stop working about two hours after export.
-    :meth:`renew` asks for a fresh token the way the browser does. With
-    ``renew_every`` (seconds) the session does that by itself before a request
-    once the interval has passed, and with ``cookie_file`` it writes the updated
-    cookies back so the next run starts from them.
+    those and stops working about two hours after export (timed once: still
+    working 113 minutes after the export, signed out at 123).
+
+    :meth:`renew` sends the request the browser uses for that, and
+    ``renew_every`` / ``cookie_file`` automate it — but a controlled run showed
+    that it does **not** help: twelve renewals, ten minutes apart, were all
+    accepted yet never issued a new token, and the renewed copy was signed out
+    at the same check as an untouched one. They are kept for experiments; plan on exporting
+    fresh cookies instead.
     """
 
     def __init__(

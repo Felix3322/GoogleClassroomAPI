@@ -75,7 +75,9 @@ COURSE_STUDENTS_SLOT = 7
 
 # Field mask the People page sends with UG41I (user profiles by id).
 _USER_MASK = [1, 1, None, 1, None, 1, None, None, 1, 1, 1, 1, None, None, 1]
-# Field mask the gradebook sends with Zj93ge (student submissions of one assignment).
+# Field mask the gradebook sends with Zj93ge (student submissions of one assignment). It does
+# not ask for what the student attached: replayed, records read with it have an empty slot 4.
+# The library reads with _GRADE_READ_MASK instead (this mask plus index 3), see below.
 _SUBMISSION_MASK = [None, 1, None, None, 1, None, 1, 1, 1, None, None, None, 1, None, [1], None, None,
                     None, 1, 1, 1, None, None, None, [[1, 1]], [[1, 1]], None, None, None, None, None, 1]
 
@@ -358,6 +360,9 @@ def link_descriptor(url: str) -> list:
 # --- grading ----------------------------------------------------------------------------
 
 # Masks of CVt8yf as the gradebook sent them when a draft grade was typed into a cell.
+# The read mask is the gradebook's Zj93ge mask plus index 3, the attachments of the submission
+# (the student-work page reads those on their own with [null, 1, null, 1]). Replayed: Zj93ge
+# accepts it from teachers and students, by item and by reference, and returns the attachments.
 _GRADE_WRITE_MASK = [None, None, None, 1]
 _GRADE_READ_MASK = [None, 1, None, 1, 1, None, 1, 1, 1, None, None, None, 1, None, [1], None, None, None,
                     1, 1, 1, None, None, None, [[1, 1]], [[1, 1]], None, None, None, None, None, 1]
@@ -459,9 +464,86 @@ def return_arguments(course_id: int, item_id: int, student_id: int, grade: Optio
     return [[3], [[ref, record, _RETURN_MASK]], _GRADE_READ_MASK]
 
 
+# --- what a student attaches to their work ---------------------------------------------------
+#
+# Captured from the student's "Add or create" menu (2026-11-23). Attachments live in slot 4
+# of the submission record and are written as a whole list (mask [null, 1]): adding one sends
+# the old ones again plus the new one, removing one sends what is left. Each entry is a
+# 21-slot descriptor:
+#   a link                 [null, null, url, 4, null×13, id, null, null, 1]
+#   a new Google Doc       [null, null, null, 2, "application/vnd.google-apps.document",
+#                           null×9, [], null, null, id, null, null, 1]     (the server creates it)
+#   one already attached   the same with slot 2 = its url / Drive id, slot 4 = its type,
+#                          and its attachment id in slot 17
+# For a new entry the web app puts a random number of its own in slot 17 (seen: 32206126917,
+# -13956082662). A link keeps it as its id; a created file gets a server id instead.
+# Turning in afterwards is the plain "mark as done" request: the attachments are not sent again.
+
+SUBMISSION_ATTACHMENTS_SLOT = 4
+DRIVE_KIND_FILE = 2
+NEW_DOCUMENT_MIME = "application/vnd.google-apps.document"
+_ATTACHMENTS_MASK = [None, 1]
+ATTACHMENT_KINDS = {LINK_KIND: "link", DRIVE_KIND_FILE: "drive_file", DRIVE_KIND_FORM: "form"}
+
+
+def new_attachment_id() -> int:
+    """A client-side id for a new attachment, in the range of the web app's own."""
+    return secrets.randbelow(2 ** 36) - 2 ** 35
+
+
+def submission_link(url: str, attachment_id: Optional[int] = None) -> list:
+    """Descriptor of a link in a student's submission."""
+    return ([None, None, url, LINK_KIND] + [None] * 13
+            + [new_attachment_id() if attachment_id is None else int(attachment_id), None, None, 1])
+
+
+def submission_file(drive_id: Optional[str], mime_type: Optional[str],
+                    attachment_id: Optional[int] = None) -> list:
+    """Descriptor of a Drive file in a student's submission.
+
+    ``drive_id=None`` with a Google Docs type asks Classroom to create a new,
+    empty file of that type in the student's Drive (captured for a Doc).
+    """
+    return ([None, None, drive_id, DRIVE_KIND_FILE, mime_type] + [None] * 9 + [[]]
+            + [None, None, new_attachment_id() if attachment_id is None else int(attachment_id),
+               None, None, 1])
+
+
+def attachment_descriptor(attachment: list) -> list:
+    """The descriptor to send again for an attachment as it was read back."""
+    kind, attachment_id = attachment[3], attachment[17]
+    if kind == LINK_KIND:
+        return submission_link(attachment[2], attachment_id)
+    return submission_file(attachment[2], attachment[4], attachment_id)
+
+
+def attachments_arguments(course_id: int, item_id: int, student_id: int, descriptors: list) -> list:
+    """CVt8yf arguments that replace the attachments of the student's own submission."""
+    ref = submission_ref(course_id, item_id, student_id)
+    return [[3], [[ref, [ref, None, None, None, descriptors], _ATTACHMENTS_MASK]], _GRADE_READ_MASK]
+
+
+def parse_attachment(attachment: list) -> dict:
+    """One attachment of a submission as plain fields (layout read from real replies)."""
+    kind = attachment[3]
+    is_link = kind == LINK_KIND
+    return {
+        "attachment_id": str(attachment[17]) if len(attachment) > 17 and attachment[17] is not None else None,
+        "kind": ATTACHMENT_KINDS.get(kind, f"type-{kind}"),
+        "title": attachment[0],
+        "url": (attachment[6] if len(attachment) > 6 and attachment[6] else None) or (attachment[2] if is_link else None),
+        "drive_id": None if is_link else attachment[2],
+        "mime_type": attachment[4] if len(attachment) > 4 else None,
+    }
+
+
 def own_submission_arguments(course_id: int, item_id: int, student_id: int) -> list:
-    """Zj93ge arguments the student's page sends to read its own submission of one item."""
-    return [[None, None, 2, 0], _SUBMISSION_MASK,
+    """Zj93ge arguments that read one submission by its reference, as the student's page does.
+
+    The page sends this with the gradebook's mask; the library adds the
+    attachments field to it (see :data:`_GRADE_READ_MASK`).
+    """
+    return [[None, None, 2, 0], _GRADE_READ_MASK,
             [None, None, [submission_ref(course_id, item_id, student_id)]], 1]
 
 
@@ -480,7 +562,9 @@ def parse_submission(record: list) -> dict:
 
     ``answer`` is the text of a short answer or the picked choice;
     ``answer_type`` is 1 for a short-answer question, 2 for multiple choice,
-    ``None`` for an assignment. The whole record is kept under ``raw``.
+    ``None`` for an assignment. ``attachments`` is what the student attached
+    (slot 4, see :func:`parse_attachment`). The whole record is kept under
+    ``raw``.
     """
     try:
         ref = record[0]
@@ -509,6 +593,8 @@ def parse_submission(record: list) -> dict:
             "turned_in_ms": record[SUBMISSION_TURNED_IN_AT_SLOT] if len(record) > SUBMISSION_TURNED_IN_AT_SLOT else None,
             "answer": answer,
             "answer_type": answer_type,
+            "attachments": [parse_attachment(a) for a in (record[SUBMISSION_ATTACHMENTS_SLOT] or [])]
+            if len(record) > SUBMISSION_ATTACHMENTS_SLOT else [],
             "grade": record[SUBMISSION_GRADE_SLOT] if len(record) > SUBMISSION_GRADE_SLOT else None,
             "draft_grade": record[SUBMISSION_DRAFT_GRADE_SLOT] if len(record) > SUBMISSION_DRAFT_GRADE_SLOT else None,
             "grade_history": grades,
@@ -1019,6 +1105,30 @@ class ClassroomWeb:
         return self._write_submission(
             answer_arguments(course_id, item_id, int(self.own_user_id()), text=text, choice=choice))
 
+    def _own_attachments(self, course_id: int, item_id: int) -> list:
+        """Descriptors of what is attached to the signed-in student's submission right now."""
+        raw = self.own_submission(course_id, item_id)["raw"]
+        current = raw[SUBMISSION_ATTACHMENTS_SLOT] if len(raw) > SUBMISSION_ATTACHMENTS_SLOT else None
+        return [attachment_descriptor(a) for a in (current or [])]
+
+    def set_own_attachments(self, course_id: int, item_id: int, descriptors: list) -> dict:
+        """As a student: replace the attachments of your own submission. Replayed."""
+        return self._write_submission(
+            attachments_arguments(course_id, item_id, int(self.own_user_id()), descriptors))
+
+    def add_own_attachment(self, course_id: int, item_id: int, descriptor: list) -> dict:
+        """As a student: attach one more thing, keeping what is already attached. Replayed."""
+        return self.set_own_attachments(course_id, item_id,
+                                        self._own_attachments(course_id, item_id) + [descriptor])
+
+    def remove_own_attachment(self, course_id: int, item_id: int, attachment_id: str) -> dict:
+        """As a student: detach one attachment by its id. Replayed."""
+        current = self._own_attachments(course_id, item_id)
+        kept = [d for d in current if str(d[17]) != str(attachment_id)]
+        if len(kept) == len(current):
+            raise LookupError(f"the submission has no attachment {attachment_id}")
+        return self.set_own_attachments(course_id, item_id, kept)
+
     def question_summary(self, course_id: int, item_id: int) -> dict:
         """How many students picked each choice of a multiple-choice question (yMOiof).
 
@@ -1090,7 +1200,7 @@ class ClassroomWeb:
         a record once something happened to their work (here: a draft grade), so
         students who were merely assigned the work are absent.
         """
-        result = self.call("Zj93ge", [[100, None, 1, 0], _SUBMISSION_MASK,
+        result = self.call("Zj93ge", [[100, None, 1, 0], _GRADE_READ_MASK,
                                       [None, [[int(item_id), [int(course_id)]]]], 0])
         self._refuse_more(result, "the submission list")
         return list(result[2]) if len(result) > 2 and result[2] else []

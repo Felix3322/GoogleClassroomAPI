@@ -240,8 +240,9 @@ everybody — `CVt8yf` — and what a caller may change depends on who they are.
 The gradebook calls `Zj93ge` once per item:
 `[[100,null,1,0], mask, [null,[[itemId,[courseId]]]], 0]` (mask in
 `web/classroom.py`), answered `["hrq.sub", [hasMore], [record, …]]`; the third
-element is missing when there is no record. A teacher gets every student's
-record; a student calling the same thing gets only their own (replayed). The
+element is missing when there is no record. A teacher gets the students'
+records (seen with a class of one student); a student calling the same thing
+gets only their own (replayed). The
 student's own pages ask for one record by its reference instead:
 `[[null,null,2,0], mask, [null,null,[[studentId,[itemId,[courseId]]]]], 1]`.
 
@@ -288,10 +289,76 @@ Replayed as well:
   `Classroom.answer_question` checks it first.
 * After work was returned the student can turn it in again (state back to `2`).
 
+### What a student attaches
+
+Attachments are slot 4 of the submission record and are written as a whole
+list with the same call (`record = [ref, null, null, null, [entry, …]]`,
+`writeMask = [null,1]`): adding one sends the old ones again plus the new one,
+removing one sends what is left. Captured from the student's "Add or create"
+menu — a link, then a new Google Doc, then removing the link:
+
+```
+link            [null, null, url, 4, null×13, id, null, null, 1]
+new Google Doc  [null, null, null, 2, "application/vnd.google-apps.document", null×9, [], null, null, id, null, null, 1]
+already there   the same with slot 2 = its url / Drive id, slot 4 = its type, slot 17 = its attachment id
+```
+
+For a new entry the web app puts a random number of its own in slot 17 (seen:
+`32206126917`, `-13956082662`). A link keeps it as its attachment id; for the
+new document the server creates the file in the student's Drive (named
+"<student> - <assignment>") and answers with its own id. Read back, an entry
+is `[title, null, url or driveId, kind, mimeType, thumbnail, urlToOpen, null×3,
+2, null×3, details, 2, null, "attachmentId", null, null, 1]`; slot 13 of the
+record counts the attachments.
+
+Turning in afterwards is exactly the "mark as done" request: the attachments
+are not sent again. The teacher reads them in the same slot of the student's
+record.
+
+Replayed outside a browser, each result read back by the student and by the teacher:
+
+* a link, then a new Doc: both are listed, and the teacher's read of the record
+  shows them before the work is turned in;
+* removing one; sending an empty list removes all of them;
+* turning in keeps the attachments; adding one to turned-in work is refused
+  (error `[3]`);
+* a file that is already in the student's Drive is attached with the same
+  file entry and its Drive id in slot 2 — the type may be left out, the server
+  fills in title and type. A file that had been turned in with other work was
+  refused with error `[7, …]` (presumably because turning work in hands the
+  file over to the teacher);
+* a link to a Google Doc sent as a link entry comes back as a Drive-file
+  attachment.
+
+Reading them needs the right mask: the gradebook's `Zj93ge` mask leaves slot 4
+empty; index 3 of the mask is what returns it (the student-work page asks for
+`[null,1,null,1]`). The library reads with the mask of the write replies,
+which is the gradebook's plus index 3 — accepted from teachers and students,
+by item and by reference.
+
 After answering a multiple-choice question the page asks for the tally:
 `yMOiof [[null,null,1,0],[[itemId,[courseId]]]]` ->
 `["hrs.ssl", [[[0], itemRef, 2, [[["choice", count], …], itemRef]]]]`.
 It answers teachers too.
+
+## Keeping an exported session alive (it cannot be done)
+
+The browser keeps itself signed in by posting to
+`https://accounts.google.com/RotateCookies` (body `[000,"-0000000000000000000"]`)
+every few minutes and receiving a fresh `__Secure-1PSIDTS`. Sent with exported
+cookies the request is accepted (200) but only `__Secure-1PSIDCC` /
+`__Secure-3PSIDCC` come back, never a new `__Secure-1PSIDTS`.
+
+Controlled run: one export copied twice; one copy called RotateCookies every
+10 minutes and saved what came back, the other was never renewed, and both
+were checked against Classroom at each round. Both still answered about 113
+minutes after the export and both were redirected to the sign-in page at the
+next check, about 123 minutes after it. The twelve renewals before that did
+not issue a single new token and did not keep the renewed copy alive any
+longer than the untouched one. An earlier export was found dead after roughly
+two hours as well (not timed). So an exported session lasts about two hours
+and has to be exported again; whatever lets the browser keep its session does
+not travel with the cookies.
 
 ## Several accounts in one browser
 
@@ -421,8 +488,8 @@ two students.
 ## Not captured yet
 
 * Assigning to individual students (see above) — needs two students.
-* What a student attaches to an assignment before turning it in (files, links, new documents),
-  and private comments on a submission.
+* A student uploading a file from the computer, the Drive picker, new Slides / Sheets /
+  Drawings (only "new Docs" was captured), and private comments on a submission.
 * The question composer's three checkboxes, and students replying to each other's answers.
 * Returning the work of several students in one call (the web app's list of
   `[ref, record, mask]` entries has only ever been seen with one).

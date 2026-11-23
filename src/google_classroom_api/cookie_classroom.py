@@ -25,7 +25,8 @@ from datetime import datetime
 from typing import Any, Optional, Sequence, Union
 
 from .web.classroom import (KIND_ANNOUNCEMENT, KIND_ASSIGNMENT, KIND_MATERIAL, KIND_QUESTION,
-                            STATE_PUBLISHED, ClassroomWeb, course_id_from_url)
+                            NEW_DOCUMENT_MIME, STATE_PUBLISHED, ClassroomWeb, course_id_from_url,
+                            submission_file, submission_link)
 from .web.session import WebSession
 
 Id = Union[int, str]
@@ -379,7 +380,10 @@ class Classroom:
         """Submission records of one assignment.
 
         ``[{student_id, item_id, state, state_code, updated_ms, turned_in_ms,
-        answer, answer_type, grade, draft_grade, grade_history, raw}]``.
+        answer, answer_type, attachments, grade, draft_grade, grade_history,
+        raw}]``. ``attachments`` is what the student attached:
+        ``[{attachment_id, kind, title, url, drive_id, mime_type}]`` with
+        ``kind`` ``"link"`` or ``"drive_file"``.
         ``state`` is ``"assigned"``, ``"turned_in"``, ``"returned"`` or
         ``"unsubmitted"``; ``answer`` is a student's answer to a question;
         ``grade`` is what the student sees (set by :meth:`return_work`),
@@ -433,6 +437,29 @@ class Classroom:
     def unsubmit(self, course_id: Id, item_id: Id) -> dict:
         """Take turned-in work back. Returns your submission, now ``state == "unsubmitted"``."""
         return self._c.unsubmit(course_id, item_id)
+
+    def add_link(self, course_id: Id, item_id: Id, url: str) -> dict:
+        """Attach a link to your work (before turning it in). Returns your submission;
+        what is attached is under ``attachments``."""
+        return self._c.add_own_attachment(course_id, item_id, submission_link(url))
+
+    def add_new_doc(self, course_id: Id, item_id: Id) -> dict:
+        """Have Classroom create an empty Google Doc in your Drive and attach it to your work."""
+        return self._c.add_own_attachment(course_id, item_id, submission_file(None, NEW_DOCUMENT_MIME))
+
+    def add_drive_file(self, course_id: Id, item_id: Id, drive_id: str,
+                       mime_type: Optional[str] = None) -> dict:
+        """Attach a file that is already in your Drive, by its file id.
+
+        The type may be left out; Classroom fills in title and type. It has to
+        be a file you can still edit: one that was already turned in with other
+        work is refused.
+        """
+        return self._c.add_own_attachment(course_id, item_id, submission_file(drive_id, mime_type))
+
+    def remove_attachment(self, course_id: Id, item_id: Id, attachment_id: Id) -> dict:
+        """Detach one attachment from your work (``attachment_id`` from ``attachments``)."""
+        return self._c.remove_own_attachment(course_id, item_id, str(attachment_id))
 
     def answer_question(self, course_id: Id, item_id: Id, answer: str) -> dict:
         """Answer a question and turn the answer in.

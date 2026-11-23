@@ -534,9 +534,13 @@ def test_course_info_reads_name_and_section():
 def test_submissions_request_and_the_recorded_empty_reply():
     transcript, web = classroom(reply("Zj93ge", SUBMISSIONS_EMPTY))
     assert web.list_submissions_raw(COURSE, ITEM) == []
+    # The gradebook sent this with index 3 of the mask empty. Replayed: that mask does not return
+    # what a student attached, so the library sets index 3 too (the mask of the write replies).
     assert rpc_arguments(transcript, 1, "Zj93ge") == (
-        "[[100,null,1,0],[null,1,null,null,1,null,1,1,1,null,null,null,1,null,[1],null,null,null,1,1,1,"
+        "[[100,null,1,0],[null,1,null,1,1,null,1,1,1,null,null,null,1,null,[1],null,null,null,1,1,1,"
         "null,null,null,[[1,1]],[[1,1]],null,null,null,null,null,1],[null,[[222222222222,[111111111111]]]],0]")
+    gradebook = cw._dump([[100, None, 1, 0], cw._SUBMISSION_MASK, [None, [[ITEM, [COURSE]]]], 0])
+    assert gradebook == rpc_arguments(transcript, 1, "Zj93ge").replace("[null,1,null,1,1,", "[null,1,null,null,1,", 1)
 
 
 def test_delete_sends_the_recorded_masks_and_lifecycle_value():
@@ -1075,10 +1079,14 @@ def test_return_equals_the_request_the_student_work_page_sent():
         "[" + SENT_REF + "," + NULLS(4) + ",3,null,null,8,8," + NULLS(22) + ",1]", "[1,null,1,1," + NULLS(8) + ",1]")
 
 
-def test_reading_ones_own_submission_equals_the_request_the_students_page_sent():
-    assert envelope("Zj93ge", cw.own_submission_arguments(COURSE, ITEM, STUDENT)) == (
+def test_reading_ones_own_submission_is_the_students_request_plus_the_attachments_field():
+    captured = (
         '[[["Zj93ge","[[null,null,2,0],[null,1,null,null,1,null,1,1,1,null,null,null,1,null,[1],null,null,null,1,1,1,'
         'null,null,null,[[1,1]],[[1,1]],null,null,null,null,null,1],[null,null,[' + SENT_REF + ']],1]",null,"generic"]]]')
+    # Replayed: with the page's mask the record comes back without its attachments; with index 3
+    # set as well (what the page asks for separately, as [null,1,null,1]) it carries them.
+    assert envelope("Zj93ge", cw.own_submission_arguments(COURSE, ITEM, STUDENT)) == captured.replace(
+        "[null,1,null,null,1,", "[null,1,null,1,1,", 1)
 
 
 def student(*replies):
@@ -1143,3 +1151,83 @@ def test_a_choice_that_is_not_offered_is_refused_before_anything_is_sent():
     with pytest.raises(ValueError, match="not one of the choices"):
         Classroom(transcript.session(), account=3).answer_question(COURSE, ITEM, "not a choice")
     assert len(transcript.requests) == 4, "page, own submission, topics, one section: no write"
+
+
+# --- recorded: what a student attaches to their work ---------------------------------------
+#
+# Requests captured on 2026-11-23 from the student's "Add or create" menu (a link, then a new
+# Google Doc, then removing the link) and the attachments the real server sent back. Ids
+# replaced; the Drive id of the created document is shortened to DRIVE-DOC-ID.
+
+LINK_DESCRIPTOR = '[null,null,"https://example.com/student-link",4,' + NULLS(13) + ',32206126917,null,null,1]'
+NEW_DOC_DESCRIPTOR = ('[null,null,null,2,"application/vnd.google-apps.document",' + NULLS(9)
+                      + ',[],null,null,-13956082662,null,null,1]')
+KEPT_DOC_DESCRIPTOR = ('[null,null,"DRIVE-DOC-ID",2,"application/vnd.google-apps.kix",' + NULLS(9)
+                       + ',[],null,null,900846964632,null,null,1]')
+# The two attachments as the reply to adding the document carried them (thumbnails shortened;
+# slot 14 of the document, a list of eight details, cut to its first entry).
+LINK_READ_BACK = ('["Example Domain",null,"https://example.com/student-link",4,null,'
+                  '"https://classroom.google.com/webthumbnail?url=https://example.com/student-link",'
+                  '"https://example.com/student-link",null,null,null,2,null,null,null,null,2,null,"32206126917",'
+                  'null,null,1]')
+DOC_READ_BACK = ('["Avery Example - Replay draft",null,"DRIVE-DOC-ID",2,"application/vnd.google-apps.kix",'
+                 '"https://lh3.google.com/drive-storage/THUMB",'
+                 '"https://docs.google.com/document/d/DRIVE-DOC-ID/edit?usp=drive_web",null,null,null,2,null,null,null,'
+                 '[["Avery Example - Replay draft"]],2,null,"900846964632",null,null,1]')
+WITH_ATTACHMENTS = ('["hrw.sub",[[' + REF + ',null,1795402116456,null,[' + LINK_READ_BACK + ',' + DOC_READ_BACK + '],4,null,'
+                    '["444444444444"],null,null,null,null,null,2,null,null,null,null,null,null,1,null,null,null,null,null,'
+                    'null,null,null,null,null,null,1]]]')
+
+
+def sent_attachments(descriptors: str) -> str:
+    return sent("[" + SENT_REF + ",null,null,null,[" + descriptors + "]]", "[null,1]")
+
+
+def test_adding_a_link_equals_the_request_the_students_page_sent():
+    args = cw.attachments_arguments(COURSE, ITEM, STUDENT, [
+        cw.submission_link("https://example.com/student-link", 32206126917)])
+    assert envelope("CVt8yf", args) == sent_attachments(LINK_DESCRIPTOR)
+
+
+def test_adding_a_new_document_sends_the_link_again_and_equals_the_recorded_request():
+    args = cw.attachments_arguments(COURSE, ITEM, STUDENT, [
+        cw.submission_link("https://example.com/student-link", 32206126917),
+        cw.submission_file(None, cw.NEW_DOCUMENT_MIME, -13956082662)])
+    text = envelope("CVt8yf", args)
+    assert len(text) == 576, "the real request was 576 characters long"
+    assert text == sent_attachments(LINK_DESCRIPTOR + "," + NEW_DOC_DESCRIPTOR)
+
+
+def test_removing_the_link_sends_what_is_left_as_the_recorded_request_did():
+    kept = cw.attachment_descriptor(json.loads(DOC_READ_BACK))
+    assert envelope("CVt8yf", cw.attachments_arguments(COURSE, ITEM, STUDENT, [kept])) == sent_attachments(
+        KEPT_DOC_DESCRIPTOR)
+
+
+def test_recorded_attachments_are_read_as_plain_fields():
+    transcript, web = student(reply("Zj93ge", WITH_ATTACHMENTS.replace('"hrw.sub",[', '"hrq.sub",[false],[')))
+    record = web.own_submission(COURSE, ITEM)
+    assert record["state"] == "assigned" and record["attachments"] == [
+        {"attachment_id": "32206126917", "kind": "link", "title": "Example Domain",
+         "url": "https://example.com/student-link", "drive_id": None, "mime_type": None},
+        {"attachment_id": "900846964632", "kind": "drive_file", "title": "Avery Example - Replay draft",
+         "url": "https://docs.google.com/document/d/DRIVE-DOC-ID/edit?usp=drive_web",
+         "drive_id": "DRIVE-DOC-ID", "mime_type": "application/vnd.google-apps.kix"}]
+
+
+def test_adding_and_removing_keep_the_other_attachments():
+    """Logic of the client, given the real read-back above: the list is replaced as a whole."""
+    own = WITH_ATTACHMENTS.replace('"hrw.sub",[', '"hrq.sub",[false],[')
+    transcript, web = student(reply("Zj93ge", own), reply("CVt8yf", WITH_ATTACHMENTS),
+                              reply("Zj93ge", own), reply("CVt8yf", WITH_ATTACHMENTS))
+    web.add_own_attachment(COURSE, ITEM, cw.submission_link("https://example.com/second", 7))
+    sent_list = json.loads(rpc_arguments_at(transcript, 2, "CVt8yf"))[1][0][1][4]
+    assert [(d[2], d[3], d[17]) for d in sent_list] == [
+        ("https://example.com/student-link", 4, 32206126917), ("DRIVE-DOC-ID", 2, 900846964632),
+        ("https://example.com/second", 4, 7)]
+    web.remove_own_attachment(COURSE, ITEM, "32206126917")
+    sent_list = json.loads(rpc_arguments_at(transcript, 4, "CVt8yf"))[1][0][1][4]
+    assert [d[17] for d in sent_list] == [900846964632]
+    with pytest.raises(LookupError):
+        transcript, web = student(reply("Zj93ge", own))
+        web.remove_own_attachment(COURSE, ITEM, "12345")

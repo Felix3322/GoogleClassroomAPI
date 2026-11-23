@@ -8,9 +8,9 @@ pipeline. Use the OAuth forms backend for anything headless.
 """
 
 from .backend import WebClassroomBackend
-from .classroom import ClassroomWeb
+from .classroom import ClassroomWeb, StreamItemRejected
 from .forms import FormEditor, FormsWeb
 from .session import WebProtocolError, WebSession
 
 __all__ = ["ClassroomWeb", "WebClassroomBackend", "FormEditor", "FormsWeb",
-           "WebProtocolError", "WebSession"]
+           "StreamItemRejected", "WebProtocolError", "WebSession"]

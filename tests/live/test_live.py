@@ -5,15 +5,19 @@ throwaway objects you own:
 
     GCA_COOKIE_FILE     Netscape cookies.txt exported from a browser where the
                         test account is signed in
-    GCA_LIVE_FORM_ID    id of a scratch Google Form owned by that account
+    GCA_LIVE_FORM_ID    file id of a scratch Google Form owned by that account
+                        (the part after /forms/d/ in its edit link); optional,
+                        needed by the form-attachment test and by the opt-in
+                        web Forms tests (GCA_WEB_FORMS=1, expected to fail with
+                        exported cookies: Forms editing is bound to the device)
     GCA_LIVE_COURSE_ID  numeric id of a scratch Classroom class it teaches
 
-    pytest tests/live -v
+    pytest tests/live -k TestClassroom -v
 
-Every check reads the result back from Google in a fresh session, so a pass
-means the server really stored the change. The tests add and remove a question
-on the form, flip settings and put them back, and leave one topic and one
-draft assignment in the class.
+Every check reads the result back from Google, so a pass means the server
+really stored the change. The Classroom tests only ever create drafts, which
+students cannot see, and delete what they create; they leave one topic
+("cfb live topic") in the class and put the missing-work setting back.
 """
 
 from __future__ import annotations
@@ -23,7 +27,7 @@ import time
 
 import pytest
 
-from google_classroom_api.web import ClassroomWeb, FormsWeb, WebSession
+from google_classroom_api.web import ClassroomWeb, FormsWeb, WebProtocolError, WebSession
 from google_classroom_api.web import classroom as cw
 
 COOKIES = os.environ.get("GCA_COOKIE_FILE")
@@ -38,6 +42,8 @@ COURSE_ID = os.environ.get("GCA_LIVE_COURSE_ID")
 # are expected to fail with ordinary exported cookies. Use the OAuth forms
 # backend for anything headless (see tests/live/test_pipeline_live.py).
 WEB_FORMS = os.environ.get("GCA_WEB_FORMS") == "1"
+# Publishing notifies the students of the class, so those tests are opt-in.
+PUBLISH = os.environ.get("GCA_LIVE_PUBLISH") == "1"
 
 pytestmark = pytest.mark.skipif(not COOKIES, reason="set GCA_COOKIE_FILE to run against real Google")
 
@@ -172,3 +178,200 @@ class TestClassroom:
             assert renamed["state"] == cw.STATE_DRAFT and renamed["title"] == title + " (edited)"
         finally:
             web.delete_assignment(int(COURSE_ID), int(draft["item_id"]))
+
+    def test_all_courses_are_listed_and_include_the_test_class(self, session):
+        from google_classroom_api import Classroom
+        courses = Classroom(session).courses()
+        assert COURSE_ID in [c["course_id"] for c in courses]
+        assert all(c["name"] for c in courses)
+
+    def test_material_draft_with_a_link_is_created_listed_and_deleted(self, session):
+        from google_classroom_api import Classroom
+        cls, course = Classroom(session), int(COURSE_ID)
+        made = cls.create_material(course, f"gca live material {int(time.time())}", description="Live test.",
+                                   link_urls=["https://example.com/"], publish=False)
+        item_id = str(made["item_id"])
+        try:
+            listed = [m for m in cls.materials(course) if m["item_id"] == item_id]
+            assert listed and listed[0]["state"] == cw.STATE_DRAFT and listed[0]["text"] == "Live test."
+            assert all(a["item_id"] != item_id for a in cls.assignments(course)), "a material is not an assignment"
+        finally:
+            cls.delete_material(course, int(item_id))
+        assert all(m["item_id"] != item_id for m in cls.materials(course))
+
+    def test_announcement_draft_is_created_listed_and_deleted(self, session):
+        from google_classroom_api import Classroom
+        cls, course = Classroom(session), int(COURSE_ID)
+        text = f"gca live announcement {int(time.time())}"
+        made = cls.create_announcement(course, text, publish=False)
+        item_id = str(made["item_id"])
+        try:
+            assert any(d["item_id"] == item_id and d["text"] == text
+                       for d in cls.announcements(course, drafts=True))
+            assert all(a["item_id"] != item_id for a in cls.announcements(course)), "a draft is not in the feed"
+        finally:
+            cls.delete_announcement(course, int(item_id))
+        assert all(d["item_id"] != item_id for d in cls.announcements(course, drafts=True))
+
+    def test_draft_grade_is_set_read_back_and_cleared(self, session):
+        """Needs a published assignment and a student in the test class. Draft grades
+        are visible to teachers only; the cell is left empty afterwards."""
+        from google_classroom_api import Classroom
+        cls, course = Classroom(session), int(COURSE_ID)
+        published = [a for a in cls.assignments(course) if a["state"] == cw.STATE_PUBLISHED]
+        students = cls.students(course)
+        if not (published and students):
+            pytest.skip("the test class needs a published assignment and a student")
+        item, student = int(published[0]["item_id"]), students[0]["user_id"]
+        try:
+            assert cls.set_draft_grade(course, item, student, 6)["draft_grade"] == 6
+            mine = [s for s in cls.submissions(course, item) if s["student_id"] == student]
+            assert mine and mine[0]["draft_grade"] == 6
+        finally:
+            assert cls.clear_draft_grade(course, item, student)["draft_grade"] is None
+        mine = [s for s in cls.submissions(course, item) if s["student_id"] == student]
+        assert mine and mine[0]["draft_grade"] is None and mine[0]["grade_history"]
+
+    def test_question_drafts_of_both_types_are_created_changed_listed_and_deleted(self, session):
+        from google_classroom_api import Classroom
+        cls, course = Classroom(session), int(COURSE_ID)
+        stamp = int(time.time())
+        short = str(cls.create_question(course, f"gca live short {stamp}", instructions="One sentence.",
+                                        publish=False)["item_id"])
+        choice = str(cls.create_question(course, f"gca live choice {stamp}", choices=["A", "B"],
+                                         publish=False)["item_id"])
+        try:
+            rows = {q["item_id"]: q for q in cls.questions(course)}
+            assert rows[short]["choices"] is None and rows[short]["text"] == "One sentence."
+            assert rows[choice]["choices"] == ["A", "B"] and rows[choice]["state"] == cw.STATE_DRAFT
+            cls.update_question(course, int(short), f"gca live short {stamp}", choices=["yes", "no"])
+            assert {q["item_id"]: q for q in cls.questions(course)}[short]["choices"] == ["yes", "no"]
+        finally:
+            cls.delete_question(course, int(short))
+            cls.delete_question(course, int(choice))
+        assert not {short, choice} & {q["item_id"] for q in cls.questions(course)}
+
+    def test_a_refused_write_raises_and_changes_nothing(self, session):
+        """A delete whose question block has the wrong type is answered with HTTP 200
+        and an error status; the library must not report that as success."""
+        web, course = ClassroomWeb(session), int(COURSE_ID)
+        made = web.create_question(course, f"gca live refused {int(time.time())}", choices=["A", "B"])
+        item = int(made["item_id"])
+        try:
+            with pytest.raises(cw.StreamItemRejected):
+                web.write_item("F7Tqub", cw.delete_arguments(course, item, cw.KIND_QUESTION))
+            assert any(r["item_id"] == str(item) for r in web.list_classwork(course)), "refused, so still there"
+        finally:
+            web.delete_question(course, item)
+        assert all(r["item_id"] != str(item) for r in web.list_classwork(course))
+
+    def test_topic_is_renamed_and_deleted(self, session):
+        from google_classroom_api import Classroom
+        cls, course = Classroom(session), int(COURSE_ID)
+        name = f"gca live topic {int(time.time())}"
+        topic_id = str(cls.ensure_topic(course, name)["topic_id"])
+        try:
+            cls.rename_topic(course, topic_id, name + " renamed")
+            assert {str(t["topic_id"]): t["name"] for t in cls.topics(course)}[topic_id] == name + " renamed"
+        finally:
+            cls.delete_topic(course, topic_id)
+        assert topic_id not in {str(t["topic_id"]) for t in cls.topics(course)}
+
+    @pytest.mark.skipif(not FORM_ID, reason="set GCA_LIVE_FORM_ID to the file id of a scratch form")
+    def test_a_form_is_attached_by_its_file_link_and_its_public_link_is_refused(self, session):
+        from google_classroom_api import Classroom
+        cls, course = Classroom(session), int(COURSE_ID)
+        web = ClassroomWeb(session)
+        file_link = f"https://docs.google.com/forms/d/{FORM_ID}/edit"
+        made = cls.create_assignment(course, f"gca live form {int(time.time())}", form_url=file_link,
+                                     publish=False)
+        item_id = str(made["item_id"])
+        try:
+            section = web.call("dpT4Vd", [[100, None, 2, 0], [course], None, 1, 2, cw.READ_MASKS])
+            entry = next(e for e in section[2] if str(e[1][0][0][0]) == item_id)
+            assert entry[1][0][9] == [cw.STATE_DRAFT] and len(entry[1][0][27][0][4]) == 1, "one attachment kept"
+        finally:
+            cls.delete_assignment(course, int(item_id))
+
+        public_link = web.resolve_link(file_link)["url"]
+        assert "/forms/d/e/" in public_link
+        before = {a["item_id"] for a in cls.assignments(course)}
+        with pytest.raises(WebProtocolError):
+            cls.create_assignment(course, "must not stay", form_url=public_link, publish=False)
+        assert {a["item_id"] for a in cls.assignments(course)} == before, "the half-made draft was removed"
+
+    def test_an_update_keeps_what_is_not_passed(self, session):
+        from datetime import datetime, timedelta, timezone
+        from google_classroom_api import Classroom
+        cls, course = Classroom(session), int(COURSE_ID)
+        due = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(days=7)
+        made = cls.create_assignment(course, f"gca live keep {int(time.time())}", instructions="Keep me.",
+                                     points=7, topic="cfb live topic", due=due,
+                                     link_urls=["https://example.com/"], publish=False)
+        item_id = made["item_id"]
+        topic_id = str(cls.ensure_topic(course, "cfb live topic")["topic_id"])
+        try:
+            cls.update_assignment(course, item_id, made["title"] + " (renamed)")
+            row = cls.item(course, item_id)
+            assert row["title"].endswith("(renamed)") and row["text"] == "Keep me." and row["points"] == 7
+            assert row["due"] == due and row["due_has_time"] is True and row["topic_id"] == topic_id
+            assert len(row["attachment_ids"]) == 1 and row["state"] == cw.STATE_DRAFT
+
+            cls.update_assignment(course, item_id, points=9, topic=None, due=None)
+            row = cls.item(course, item_id)
+            assert row["points"] == 9 and row["topic_id"] is None and row["due"] is None
+            assert row["title"].endswith("(renamed)") and row["text"] == "Keep me."
+            assert len(row["attachment_ids"]) == 1
+        finally:
+            cls.delete_assignment(course, item_id)
+        with pytest.raises(LookupError):
+            cls.item(course, item_id)
+
+    def test_deleting_a_topic_keeps_the_posts_under_it(self, session):
+        from google_classroom_api import Classroom
+        cls, course = Classroom(session), int(COURSE_ID)
+        name = f"gca live topic with a post {int(time.time())}"
+        made = cls.create_assignment(course, name, topic=name, publish=False)
+        topic_id = cls.item(course, made["item_id"])["topic_id"]
+        try:
+            assert topic_id
+            cls.delete_topic(course, topic_id)
+            assert cls.item(course, made["item_id"])["topic_id"] is None
+        finally:
+            cls.delete_assignment(course, made["item_id"])
+
+    @pytest.mark.skipif(not PUBLISH, reason="publishing notifies the class's students; set GCA_LIVE_PUBLISH=1 "
+                                            "only for a class that has no real students")
+    def test_drafts_of_every_kind_are_published_as_they_are_and_deleted(self, session):
+        from google_classroom_api import Classroom
+        cls, course = Classroom(session), int(COURSE_ID)
+        stamp = int(time.time())
+        drafts = {
+            "assignment": cls.create_assignment(course, f"gca live publish a {stamp}", points=5,
+                                                link_urls=["https://example.com/"], publish=False),
+            "material": cls.create_material(course, f"gca live publish m {stamp}", description="Read this.",
+                                            link_urls=["https://example.com/"], publish=False),
+            "question": cls.create_question(course, f"gca live publish q {stamp}", choices=["A", "B"],
+                                            publish=False),
+            "announcement": cls.create_announcement(course, f"gca live publish n {stamp}", publish=False),
+        }
+        delete = {"assignment": cls.delete_assignment, "material": cls.delete_material,
+                  "question": cls.delete_question, "announcement": cls.delete_announcement}
+        try:
+            for kind, draft in drafts.items():
+                before = cls.item(course, draft["item_id"])
+                assert before["state"] == cw.STATE_DRAFT and before["kind"] == kind
+                assert cls.publish(course, draft["item_id"])["state"] == cw.STATE_PUBLISHED
+                after = cls.item(course, draft["item_id"])
+                assert after["state"] == cw.STATE_PUBLISHED
+                for field in ("title", "text", "points", "attachment_ids"):
+                    assert after[field] == before[field], (kind, field)
+                assert after.get("choices") == before.get("choices")
+            posted = {a["item_id"] for a in cls.announcements(course)}
+            assert drafts["announcement"]["item_id"] in posted
+        finally:
+            for kind, draft in drafts.items():
+                delete[kind](course, draft["item_id"])
+        for draft in drafts.values():
+            with pytest.raises(LookupError):
+                cls.item(course, draft["item_id"])

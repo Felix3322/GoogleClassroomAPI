@@ -550,8 +550,12 @@ def test_delete_sends_the_recorded_masks_and_lifecycle_value():
 def test_assignments_are_listed_one_classwork_section_at_a_time():
     transcript, web = classroom(reply("ZZFlc", TOPICS), reply("dpT4Vd", SECTION_EMPTY),
                                 reply("dpT4Vd", SECTION_ONE_DRAFT))
-    assert web.list_assignments(COURSE) == [{"item_id": "900816770865", "state": 3, "topic_id": "900816347160",
-                                             "title": "Library draft with topic and due"}]
+    # The recorded item was cut after slot 9, so points / due / attachments are not in it.
+    assert web.list_assignments(COURSE) == [{"item_id": "900816770865", "kind": "assignment", "state": 3,
+                                             "topic_id": "900816347160", "text": "",
+                                             "title": "Library draft with topic and due",
+                                             "points": None, "due": None, "due_has_time": False,
+                                             "attachment_ids": []}]
     no_topic = json.loads(rpc_arguments(transcript, 2, "dpT4Vd"))
     in_topic = json.loads(rpc_arguments(transcript, 3, "dpT4Vd"))
     # The web app sent [10,null,2,0]; 100 was replayed and accepted, and avoids paging.
@@ -568,3 +572,400 @@ def test_course_id_comes_from_the_base64_segment_of_a_classroom_link():
         assert cw.course_id_from_url(link) == 123456789012
     with pytest.raises(ValueError):
         cw.course_id_from_url("https://classroom.google.com/u/0/h")
+
+
+# --- recorded 2026-11-22 (third capture): materials, announcements, links, grades, course list ---
+#
+# Each request below was captured from the Classroom web app (composer, gradebook
+# cell, home page start-up). The library's builders are compared with the captured
+# text character for character; ids are placeholders of the same length.
+
+ATTACHMENT = 555555555555
+
+
+def envelope(rpc: str, arguments: list) -> str:
+    return cw._dump([[[rpc, cw._dump(arguments), None, "generic"]]])
+
+
+def test_draft_grade_equals_the_request_the_gradebook_cell_sent():
+    assert envelope("CVt8yf", cw.draft_grade_arguments(COURSE, ITEM, STUDENT, 7)) == (
+        '[[["CVt8yf","[[3],[[[444444444444,[222222222222,[111111111111]]],[[444444444444,[222222222222,[111111111111]]],'
+        'null,null,null,null,null,null,null,null,7],[null,null,null,1]]],[null,1,null,1,1,null,1,1,1,null,null,null,1,null,'
+        '[1],null,null,null,1,1,1,null,null,null,[[1,1]],[[1,1]],null,null,null,null,null,1]]",null,"generic"]]]')
+
+
+def test_link_attachment_equals_the_request_the_composer_sent():
+    arguments = [[cw.link_descriptor("https://example.com/"), None, [[ITEM, [COURSE]]]], [cw._ATTACHMENT_MASK]]
+    assert envelope("n5QGnd", arguments) == (
+        '[[["n5QGnd","[[[null,null,\\"https://example.com/\\",4,null,null,null,null,null,null,null,null,null,null,null,'
+        'null,null,null,null,null,1],null,[[222222222222,[111111111111]]]],[[null,1,1,1,1,1,null,1,1,1,1,1,1,null,'
+        '[[1,1,1,1,1],1,1,1,1,1,1],[[1,1,1,1,1],1,1,1,[1,1],1],1,null,1,[[1,1,1,1,1],1,1],1,[[1,1,1,1,1],1]]]]",'
+        'null,"generic"]]]')
+
+
+def test_course_list_equals_the_request_the_home_page_sent_at_start_up():
+    text = envelope("gXtzob", cw.course_list_arguments())
+    assert len(text) == 512, "the real request was 512 characters long"
+    assert text.startswith('[[["gXtzob","[[100,null,1,0],[1,1,null,null,1,1,null,1,[null,1,null,1,null,1,')
+    assert text.endswith(',[[null,[[1]]],null,null,[1,2,3],null,null,[1,2]]]",null,"generic"]]]')
+
+
+def test_material_draft_has_the_recorded_envelope_and_length():
+    item = cw.stream_item(COURSE, "GCA material capture", client_uuid="0262B980-EFEA-4C30-B08B-C9ABCB171136")
+    text = envelope("n5NjMc", cw.create_item_arguments(cw.KIND_MATERIAL, item))
+    assert len(text) == 1033, "the real request was 1033 characters long"
+    assert text.startswith('[[["n5NjMc","[[[7,null,null,null,null,[[[null,[111111111111]],null,null,null,null,'
+                           '\\"GCA material capture\\",null,null,null,[3],')
+    assert text.endswith(']]]],null,[1,1,1],null,null,null,null,null,[1,1,null,1]]",null,"generic"]]]')
+
+
+def test_announcement_draft_has_the_recorded_envelope_and_length():
+    item = cw.stream_item(COURSE, "", instructions="GCA announcement capture",
+                          client_uuid="FBC8339C-D4D2-4C39-956A-998CFCB5277A")
+    text = envelope("n5NjMc", cw.create_item_arguments(cw.KIND_ANNOUNCEMENT, item))
+    assert len(text) == 1143, "the real request was 1143 characters long"
+    assert text.startswith(
+        '[[["n5NjMc","[[[3,null,[[[null,[111111111111]],null,null,null,null,\\"\\",null,null,null,[3],null,null,null,'
+        'null,null,1,null,null,null,null,null,null,null,null,null,[0],null,[[null,'
+        '\\"FBC8339C-D4D2-4C39-956A-998CFCB5277A\\",null,[\\"edu.rt\\",\\"GCA announcement capture\\"],null,null,'
+        '[\\"edu.rt\\",\\"GCA announcement capture\\",null,null,[null,\\"GCA announcement capture\\"]]]]]]]],')
+
+
+def test_material_update_with_a_link_has_the_recorded_envelope_and_length():
+    item = cw.stream_item(COURSE, "GCA material capture", item_id=ITEM, attachment_ids=[ATTACHMENT],
+                          client_uuid="0262B980-EFEA-4C30-B08B-C9ABCB171136")
+    text = envelope("F7Tqub", cw.update_item_arguments(cw.KIND_MATERIAL, item))
+    assert len(text) == 1561, "the real request was 1561 characters long"
+    assert text.startswith(
+        '[[["F7Tqub","[[[7,null,null,null,null,[[[222222222222,[111111111111]],null,null,null,null,'
+        '\\"GCA material capture\\",null,null,null,[3],null,null,null,null,null,1,null,null,null,null,null,null,null,'
+        'null,null,[0],null,[[null,\\"0262B980-EFEA-4C30-B08B-C9ABCB171136\\",null,null,'
+        '[[null,[[222222222222,[111111111111]],555555555555]]]]]]]]],[[[1,null,null,[1,null,1,1],null,1,4,1,')
+
+
+@pytest.mark.parametrize("scope, kinds, states, page, length", [
+    ([2], [2, 5], [2], 10, 784),      # the gradebook's columns
+    ([2, 3], None, [2], 10, 785),     # the Stream page's feed
+    ([2], [3], [3], 100, 783),        # the announcement drafts drawer
+])
+def test_stream_queries_have_the_recorded_lengths(scope, kinds, states, page, length):
+    text = envelope("pONvgf", cw.stream_query_arguments(COURSE, scope, kinds, states, page_size=page))
+    assert len(text) == length
+
+
+def test_listing_tells_assignments_materials_and_announcements_apart():
+    # Envelope shapes as captured; items reduced to the slots the library reads.
+    def item(item_id, title):
+        stream = [None] * 28
+        stream[0], stream[5], stream[9] = [str(item_id), [str(COURSE)]], title, [3]
+        return stream
+    assert cw.entry_kind_and_item([2, [item(1, "a"), [None]]])[0] == "assignment"
+    assert cw.entry_kind_and_item([3, None, [item(2, "")]])[0] == "announcement"
+    assert cw.entry_kind_and_item([7, None, None, None, None, [item(3, "m")]])[0] == "material"
+
+
+# Replies the real server gave in the gradebook (student, item, course and teacher ids replaced).
+SUBMISSIONS_ONE = (
+    '["hrq.sub",[false],[[["444444444444",["222222222222",["111111111111"]]],null,1795391573092,null,null,4,null,'
+    '["444444444444"],null,8,null,null,null,0,null,null,null,null,null,[[[4,1795390975171,["333333333333"],1,null,5],'
+    'null,1],[null,[7,100,1795390975171,["333333333333"],null,1,5],2],[null,[8,100,1795391573086,["333333333333"],'
+    'null,1,5],2]],1,null,null,null,null,null,null,null,null,null,null,null,1]]]')
+GRADE_CLEARED = (
+    '["hrw.sub",[[["444444444444",["222222222222",["111111111111"]]],null,1795392124035,null,null,4,null,'
+    '["444444444444"],null,null,null,null,null,0,null,null,null,null,null,[[[4,1795390975171,["333333333333"],1,null,5],'
+    'null,1],[null,[7,100,1795390975171,["333333333333"],null,1,5],2],[null,[8,100,1795391573086,["333333333333"],'
+    'null,1,5],2],[null,[null,100,1795392124025,["333333333333"],null,1,1],2]],1,null,null,null,null,null,null,null,'
+    'null,null,null,null,1]]]')
+
+
+def test_a_recorded_submission_with_a_draft_grade_is_parsed():
+    transcript, web = classroom(reply("Zj93ge", SUBMISSIONS_ONE))
+    (record,) = web.list_submissions(COURSE, ITEM)
+    assert (record["student_id"], record["item_id"]) == ("444444444444", "222222222222")
+    assert record["draft_grade"] == 8 and record["state_code"] == 4 and record["updated_ms"] == 1795391573092
+    assert [(g["grade"], g["max_points"]) for g in record["grade_history"]] == [(7, 100), (8, 100)]
+    assert record["grade_history"][0]["by_user_id"] == "333333333333"
+
+
+def test_clearing_a_draft_grade_equals_the_request_an_emptied_cell_sent():
+    assert envelope("CVt8yf", cw.draft_grade_arguments(COURSE, ITEM, STUDENT, None)) == (
+        '[[["CVt8yf","[[3],[[[444444444444,[222222222222,[111111111111]]],[[444444444444,[222222222222,[111111111111]]]],'
+        '[null,null,null,1]]],[null,1,null,1,1,null,1,1,1,null,null,null,1,null,[1],null,null,null,1,1,1,null,null,null,'
+        '[[1,1]],[[1,1]],null,null,null,null,null,1]]",null,"generic"]]]')
+
+
+def test_the_recorded_reply_to_clearing_a_grade_is_parsed():
+    transcript, web = classroom(reply("CVt8yf", GRADE_CLEARED))
+    record = web.set_draft_grade(COURSE, ITEM, STUDENT, None)
+    assert record["draft_grade"] is None
+    assert [g["grade"] for g in record["grade_history"]] == [7, 8, None]
+
+
+# Listing replies. The envelopes (tag, "more" flag, entry type, payload slot, where the text and
+# the state sit) are as the real server returned them on the Stream page and the home page; the
+# items are cut down to the slots the library reads, with placeholder ids.
+
+def listed_item(item_id: int, title: str, state: list, text: str = "") -> list:
+    stream: list = [None] * 28
+    stream[0], stream[5], stream[9] = [str(item_id), [str(COURSE)]], title, state
+    stream[27] = [[None, "UUID", None, None, None, None, ["edu.rt", text, None, None, [None, text]]]] if text else [[None, "UUID"]]
+    return stream
+
+
+def test_announcement_drafts_are_listed_from_the_recorded_reply_shape():
+    draft = [3, None, [listed_item(ITEM, "", [3], "GCA announcement capture")]]
+    transcript, web = classroom(reply("pONvgf", json.dumps(["hrsi.qr", [False], [draft]])))
+    assert web.list_announcements(COURSE, drafts=True) == [
+        {"item_id": str(ITEM), "kind": "announcement", "title": "", "state": 3, "topic_id": None,
+         "text": "GCA announcement capture", "points": None, "due": None, "due_has_time": False,
+         "attachment_ids": []}]
+    sent = json.loads(rpc_arguments(transcript, 1, "pONvgf"))
+    assert sent[0] == [100, None, 1, 0] and sent[1] == cw.READ_MASKS and sent[2] == [[[2], [[COURSE]], [3], [3]]]
+
+
+def test_the_feed_lists_published_items_and_keeps_only_announcements_when_asked():
+    posted = [2, [listed_item(ITEM, "CFB test assignment", [2, ["333333333333"], 1795369052717],
+                              "Complete the form."), [None], None, None, [2, 2]]]
+    note = [3, None, [listed_item(ATTACHMENT, "", [2, ["333333333333"], 1795369052717], "Hello class")]]
+    body = json.dumps(["hrsi.qr", [False], [posted, note]])
+    transcript, web = classroom(reply("pONvgf", body), reply("pONvgf", body))
+    assert [(r["kind"], r["title"], r["state"]) for r in web.list_stream(COURSE)] == [
+        ("assignment", "CFB test assignment", 2), ("announcement", "", 2)]
+    assert [r["text"] for r in web.list_announcements(COURSE)] == ["Hello class"]
+    # The Stream page sent [2, 3] here (live and deleted); replayed: [2] returns the live ones only.
+    assert json.loads(rpc_arguments(transcript, 1, "pONvgf"))[2] == [[[2], [[COURSE]], None, [2]]]
+
+
+def test_courses_are_listed_from_the_recorded_reply_shape():
+    course: list = [None] * 54
+    course[0], course[5], course[8] = ["111111111111"], "CFB test class", "G6-G8"
+    transcript, web = classroom(reply("gXtzob", json.dumps(["hrq.crs", [False], [course]])))
+    assert web.list_courses() == [{"course_id": "111111111111", "name": "CFB test class", "section": "G6-G8"}]
+    assert json.loads(rpc_arguments(transcript, 1, "gXtzob")) == cw.course_list_arguments()
+
+
+def test_a_material_in_a_classwork_section_is_not_mistaken_for_an_assignment():
+    material = [7, None, None, None, None, [listed_item(ATTACHMENT, "GCA material capture", [3])]]
+    assignment = [2, [listed_item(ITEM, "CFB draft two", [3]), [None], None, None, [2, 2]]]
+    transcript, web = classroom(reply("ZZFlc", '["hrt.qr",null,[]]'),
+                                reply("dpT4Vd", json.dumps(["hrcw.qr", [False], [material, assignment]])))
+    rows = web.list_classwork(COURSE)
+    assert [(r["kind"], r["title"]) for r in rows] == [("material", "GCA material capture"),
+                                                        ("assignment", "CFB draft two")]
+    transcript, web = classroom(reply("ZZFlc", '["hrt.qr",null,[]]'),
+                                reply("dpT4Vd", json.dumps(["hrcw.qr", [False], [material, assignment]])))
+    assert [r["title"] for r in web.list_assignments(COURSE)] == ["CFB draft two"]
+
+
+# --- recorded: questions, topic rename and delete ------------------------------------------
+#
+# Requests captured in the Classwork page on 2026-11-22 (ids replaced by same-length placeholders).
+
+TOPIC = "666666666666"
+# Everything after the item in the request the "delete" menu sent for a question draft.
+RECORDED_DELETE_TAIL = (
+    ',[[[null,null,null,null,null,1],[]],[[null,null,null,null,null,1]],[[null,null,null,null,null,1],[]],'
+    'null,null,[[null,null,null,null,null,1]]],[[[1,1,1,1,1,null,null,[1,1,1,null,1,1,1],1,1,1,1,1,1,null,null,'
+    'null,null,1,null,null,null,1,[1],1,[null,null,1,1,1,null,1]],[1,1,1,1,1,1,[1],1,null,[1,1],1,0,null,0,'
+    '[[1,1,[],[null,1]],1,1],null,null,null,1],[null,1],null,[1,1]],[[1,1,1,1,1,null,null,[1,1,1,null,1,1,1],'
+    '1,1,1,1,1,1,null,null,null,null,1,null,null,null,1,[1],1,[null,null,1,1,1,null,1]]],[[1,1,1,1,1,null,null,'
+    '[1,1,1,null,1,1,1],1,1,1,1,1,1,null,null,null,null,1,null,null,null,1,[1],1,[null,null,1,1,1,null,1]],'
+    '[1,1,1,1,1,1,[1],1,null,[1,1],1,0,null,0,[[1,1,[],[null,1]],1,1],null,null,null,1],[1]],null,null,'
+    '[[1,1,1,1,1,null,null,[1,1,1,null,1,1,1],1,1,1,1,1,1,null,null,null,null,1,null,null,null,1,[1],1,'
+    '[null,null,1,1,1,null,1]]]],null,[1,1,1]]')
+# What the real server answered to a delete it refused, and to one it carried out
+# (first slots of the item; the rest of each reply was cut).
+DELETE_REFUSED = ('["hrsi.ur",[[[13,"generic"],[5,null,null,[[["222222222222",["111111111111"]],null,null,null,'
+                  'null,"",null,null,3,[3]]]]]]]')
+DELETE_DONE = ('["hrsi.ur",[[[0],[5,null,null,[[["222222222222",["111111111111"]],1795394916953,1795394919905,'
+               '1795394919905,["333333333333"],"GCA probe choice",null,null,3,[3]]]]]]]')
+
+
+def test_short_answer_question_equals_the_request_the_composer_sent():
+    item = cw.stream_item(COURSE, "GCA question capture", client_uuid="D754C248-4BB6-49A7-8831-66359D6A1204")
+    text = envelope("n5NjMc", cw.create_question_arguments(item))
+    assert len(text) == 1082, "the real request was 1082 characters long"
+    assert text.startswith(
+        '[[["n5NjMc","[[[5,null,null,[[[null,[111111111111]],null,null,null,null,\\"GCA question capture\\",null,'
+        'null,null,[3],null,null,null,null,null,1,null,null,null,null,null,null,null,null,null,[0],null,'
+        '[[null,\\"D754C248-4BB6-49A7-8831-66359D6A1204\\"]]],[null,null,0,100,0,1,[2],null,null,[null,0],null,0],'
+        '[1,[]]]]],')
+
+
+def test_switching_a_question_to_multiple_choice_equals_the_recorded_update():
+    item = cw.stream_item(COURSE, "GCA question capture", item_id=ITEM,
+                          client_uuid="D754C248-4BB6-49A7-8831-66359D6A1204")
+    text = envelope("F7Tqub", cw.update_question_arguments(item, choices=["2/4", "2/3"]))
+    assert len(text) == 1568, "the real request was 1568 characters long"
+    assert text.startswith(
+        '[[["F7Tqub","[[[5,null,null,[[[222222222222,[111111111111]],null,null,null,null,\\"GCA question capture\\",'
+        'null,null,null,[3],null,null,null,null,null,1,null,null,null,null,null,null,null,null,null,[0],null,'
+        '[[null,\\"D754C248-4BB6-49A7-8831-66359D6A1204\\"]]],[null,null,0,100,0,1,[2],null,null,[null,0],null,0],'
+        '[2,null,[[\\"2/4\\",\\"2/3\\"]]]]]],[[[1,null,null,[1,null,1,1],')
+
+
+def test_topic_rename_and_delete_equal_the_requests_the_topic_menu_sent():
+    assert envelope("WRrP0b", cw.rename_topic_arguments(COURSE, TOPIC, "CFB facade topic renamed")) == (
+        '[[["WRrP0b","[[[\\"666666666666\\",[111111111111]],\\"CFB facade topic renamed\\"],[1],[1,1,1]]",'
+        'null,"generic"]]]')
+    assert envelope("EjPfY", cw.delete_topic_arguments(COURSE, TOPIC)) == (
+        '[[["EjPfY","[[\\"666666666666\\",[111111111111]]]",null,"generic"]]]')
+
+
+@pytest.mark.parametrize("kind", [cw.KIND_ASSIGNMENT, cw.KIND_ANNOUNCEMENT, cw.KIND_QUESTION, cw.KIND_MATERIAL])
+def test_a_delete_ends_exactly_like_the_recorded_delete(kind):
+    assert cw._dump(cw.delete_arguments(COURSE, ITEM, kind)).endswith(RECORDED_DELETE_TAIL)
+
+
+def test_a_question_delete_carries_a_block_of_the_questions_own_type():
+    # The menu sent the question's full block; replayed on the real server: only the type matters.
+    short = cw.delete_arguments(COURSE, ITEM, cw.KIND_QUESTION)[0][0]
+    choice = cw.delete_arguments(COURSE, ITEM, cw.KIND_QUESTION, multiple_choice=True)[0][0]
+    assert short[0] == choice[0] == 5 and short[1:3] == choice[1:3] == [None, None]
+    assert short[3][0][0] == [ITEM, [COURSE]] and short[3][0][8] == 3
+    assert short[3][2] == [1, []] and choice[3][2] == [2, None, [[]]]
+
+
+def test_the_recorded_refusal_of_a_write_is_an_error_not_a_success():
+    transcript, web = classroom(reply("F7Tqub", DELETE_REFUSED))
+    with pytest.raises(cw.StreamItemRejected) as refused:
+        web.write_item("F7Tqub", cw.delete_arguments(COURSE, ITEM, cw.KIND_QUESTION))
+    assert refused.value.status == [13, "generic"]
+
+
+def test_deleting_a_question_falls_back_to_the_multiple_choice_form_when_refused():
+    transcript, web = classroom(reply("F7Tqub", DELETE_REFUSED), reply("F7Tqub", DELETE_DONE))
+    web.delete_question(COURSE, ITEM)
+    first = json.loads(rpc_arguments(transcript, 1, "F7Tqub"))
+    second = json.loads(rpc_arguments(transcript, 2, "F7Tqub"))
+    assert first[0][0][3][2] == [1, []] and second[0][0][3][2] == [2, None, [[]]]
+
+
+def test_a_short_answer_question_is_deleted_with_one_request():
+    transcript, web = classroom(reply("F7Tqub", DELETE_DONE))
+    web.delete_question(COURSE, ITEM)
+    assert len(transcript.requests) == 2, "the boot page and one delete"
+
+
+def test_questions_are_listed_with_their_choices():
+    # Envelope and question blocks as the real listing returned them; items cut to the slots read.
+    multiple = [5, None, None, [listed_item(ITEM, "GCA question capture", [3]), [None], [2, None, [["2/4", "2/3"]]]]]
+    short = [5, None, None, [listed_item(ATTACHMENT, "GCA verify short", [3], "Answer in a sentence."), [None],
+                             [1, []]]]
+    transcript, web = classroom(reply("ZZFlc", '["hrt.qr",null,[]]'),
+                                reply("dpT4Vd", json.dumps(["hrcw.qr", [False], [multiple, short]])))
+    assert [(r["kind"], r["title"], r["choices"], r["text"]) for r in web.list_classwork(COURSE)] == [
+        ("question", "GCA question capture", ["2/4", "2/3"], ""),
+        ("question", "GCA verify short", None, "Answer in a sentence.")]
+
+
+# --- recorded: a form's public responder link is not seen as a form ------------------------
+#
+# The real server's answer to u1xGoc for ".../forms/d/e/<id>/viewform" (id replaced): kind 4,
+# a plain web link with no Drive id. The file link of the same form answers kind 7 (above).
+
+PUBLIC_FORM_LINK = "https://docs.google.com/forms/d/e/1FAIpQLSexample/viewform"
+PUBLIC_LINK_IS_NOT_A_FORM = (
+    '["hrq.pau",["CFB test form",null,"https://docs.google.com/forms/d/e/1FAIpQLSexample/viewform",4,null,'
+    '"https://classroom.google.com/webthumbnail?url=https://docs.google.com/forms/d/e/1FAIpQLSexample/viewform",'
+    '"https://docs.google.com/forms/d/e/1FAIpQLSexample/viewform"]]')
+
+
+def test_the_public_responder_link_is_refused_instead_of_attached_as_something_else():
+    transcript, web = classroom(reply("u1xGoc", PUBLIC_LINK_IS_NOT_A_FORM))
+    assert web.resolve_link(PUBLIC_FORM_LINK)["is_form"] is False
+    transcript, web = classroom(reply("u1xGoc", PUBLIC_LINK_IS_NOT_A_FORM))
+    with pytest.raises(WebProtocolError, match="forms/d/<fileId>/edit"):
+        web.attach_form(COURSE, ITEM, PUBLIC_FORM_LINK)
+    assert len(transcript.requests) == 2, "the boot page and the link lookup; nothing was attached"
+
+
+def test_a_failed_attachment_removes_the_draft_it_was_meant_for():
+    from google_classroom_api import Classroom
+    # DRAFT_CREATED stands in for the reply to the delete as well: the library reads only
+    # the status pair of it, and both are successful stream-item writes ("hrsi.ur", [0]).
+    transcript = Transcript(BOOT, reply("n5NjMc", DRAFT_CREATED), reply("u1xGoc", PUBLIC_LINK_IS_NOT_A_FORM),
+                            reply("F7Tqub", DRAFT_CREATED))
+    with pytest.raises(WebProtocolError):
+        Classroom(transcript.session()).create_assignment(COURSE, "CFB test assignment",
+                                                          form_url=PUBLIC_FORM_LINK, publish=False)
+    removed = json.loads(rpc_arguments(transcript, 3, "F7Tqub"))
+    assert removed[0][0][1][0][0] == [900816021533, [COURSE]], "the draft that was just created"
+    assert removed[0][0][1][0][8] == cw.ITEM_DELETED and removed[1] == cw.DELETE_MASKS
+
+
+# --- recorded: what a listed item carries, and updates that keep it -------------------------
+#
+# Read back from the real Classwork listing on 2026-11-23 for a draft made with 7 points, a due
+# date with a time, a topic and one link attachment (ids replaced): the coursework block, the
+# attachment list of the body, and slot 14. Then the same draft after an update that passed
+# only a title: everything else was gone and the points were back at 100.
+
+DUE_MS = 1796001486617
+COURSEWORK_FULL = [DUE_MS, 1795396687467, True, 7, False, 1, [1], None, None, [1, False],
+                   None, None, None, None, None, None, None, None, 1]
+COURSEWORK_BARE = [None, 1795396687467, False, 100, False, 1, [1], None, None, [1, False],
+                   None, None, None, None, None, None, None, None, 1]
+
+
+def full_draft() -> list:
+    stream = listed_item(ITEM, "GCA probe keep", [3], "Keep me.")
+    stream[14] = [[TOPIC, [str(COURSE)]]]
+    stream[27][0][4] = [[None, [[str(ITEM), [str(COURSE)]], str(ATTACHMENT)]]]
+    return [2, [stream, COURSEWORK_FULL, None, None, [2, 2]]]
+
+
+def test_a_listed_assignment_carries_points_due_date_topic_and_attachments():
+    from datetime import datetime, timedelta, timezone
+    details = cw.entry_details(full_draft())
+    assert details == {"points": 7, "due_has_time": True, "attachment_ids": [str(ATTACHMENT)], "topic_id": TOPIC,
+                       "due": datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(milliseconds=DUE_MS)}
+    bare = [2, [listed_item(ITEM, "GCA probe keep (renamed)", [3]), COURSEWORK_BARE, None, None, [2, 2]]]
+    assert cw.entry_details(bare) == {"points": 100, "due": None, "due_has_time": False,
+                                      "attachment_ids": [], "topic_id": None}
+
+
+def test_a_due_date_survives_the_round_trip_to_the_millisecond():
+    due = cw.entry_details(full_draft())["due"]
+    assert cw.due_fields(due, True) == (DUE_MS, 1)
+    assert due.utcoffset().total_seconds() == 0
+
+
+def test_an_update_sends_back_everything_that_was_not_asked_to_change():
+    """Logic of the facade, not protocol evidence: given the real read-back above, the
+    rewrite must carry the old text, points, due date, topic and attachment along."""
+    from google_classroom_api import Classroom
+    section = json.dumps(["hrcw.qr", [False], [full_draft()]])
+    topics = json.dumps(["hrt.qr", None, [[[TOPIC, [str(COURSE)]], "Unit 1", 1795368958080, "gA=="]]])
+    transcript = Transcript(BOOT, reply("ZZFlc", topics), reply("dpT4Vd", SECTION_EMPTY),
+                            reply("dpT4Vd", section), reply("F7Tqub", DRAFT_CREATED))
+    Classroom(transcript.session()).update_assignment(COURSE, str(ITEM), "New title")
+    sent = json.loads(rpc_arguments(transcript, 4, "F7Tqub"))
+    item, coursework = sent[0][0][1][0], sent[0][0][1][1]
+    assert item[0] == [ITEM, [COURSE]] and item[5] == "New title" and item[9] == [3]
+    assert item[14] == [[TOPIC, [COURSE]]]
+    body = item[27][0]
+    assert body[3] == ["edu.rt", "Keep me."] and body[4] == [[None, [[ITEM, [COURSE]], ATTACHMENT]]]
+    assert coursework[0] == DUE_MS and coursework[2] == 1 and coursework[3] == 7
+    assert sent[1] == cw.UPDATE_MASKS
+
+
+def test_publish_resends_a_draft_unchanged_with_the_published_state():
+    from google_classroom_api import Classroom
+    section = json.dumps(["hrcw.qr", [False], [full_draft()]])
+    topics = json.dumps(["hrt.qr", None, [[[TOPIC, [str(COURSE)]], "Unit 1", 1795368958080, "gA=="]]])
+    transcript = Transcript(BOOT, reply("ZZFlc", topics), reply("dpT4Vd", SECTION_EMPTY),
+                            reply("dpT4Vd", section), reply("F7Tqub", DRAFT_CREATED))
+    Classroom(transcript.session()).publish(COURSE, ITEM)
+    sent = json.loads(rpc_arguments(transcript, 4, "F7Tqub"))
+    item, coursework = sent[0][0][1][0], sent[0][0][1][1]
+    assert item[9] == [2] and item[5] == "GCA probe keep" and item[14] == [[TOPIC, [COURSE]]]
+    assert item[27][0][4] == [[None, [[ITEM, [COURSE]], ATTACHMENT]]] and coursework[3] == 7
+
+
+def test_asking_for_an_item_the_class_does_not_have_is_a_lookup_error():
+    from google_classroom_api import Classroom
+    transcript = Transcript(BOOT, reply("ZZFlc", '["hrt.qr",null,[]]'), reply("dpT4Vd", SECTION_EMPTY),
+                            reply("pONvgf", '["hrsi.qr",[false]]'), reply("pONvgf", '["hrsi.qr",[false]]'))
+    with pytest.raises(LookupError):
+        Classroom(transcript.session()).item(COURSE, ITEM)

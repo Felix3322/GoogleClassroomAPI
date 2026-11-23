@@ -1,11 +1,12 @@
 # Google Classroom web app: private RPCs (reverse-engineered)
 
 Captured 2026-11-22 from classroom.google.com in Chrome, with a personal
-Google account and a throwaway class that has no students. Everything below
-was observed in real requests made by the web app. Listing and creating
-topics, and creating, updating and publishing an assignment, were also sent by
-hand with self-built requests and accepted by the server. Nothing involving
-students could be captured (the test class is empty).
+Google account and a throwaway class (first empty, later with one student).
+Everything below was observed in real requests made by the web app. Where a
+section says **replayed**, the library's own request was sent outside a
+browser, with exported cookies, to the real server and the result was read
+back. What needs a second student, or a student who turns work in, could not
+be captured (see the end).
 
 Envelope parameters (confirmed by replay): `f.sid`, `bl` and `at` are the
 values of `FdrFJe`, `cfb2h` and `SNlM0e` in the page's `WIZ_global_data`.
@@ -45,6 +46,9 @@ IDs are decimal strings. The course URL `/c/{x}` is the base64 of the course id.
 | `MNXWId` | `hrw.usr` | user profile and notification settings | `[[3], [[[userId], …]]]` |
 | `ZZFlc` | `hrt.qr` | list topics | `[[100,null,1,0],[1,1,1],[[[[courseId]]]]]` |
 | `lkA1wb` | `hrt.ur` | create topic | `[[[null,[courseId]],"topic name"],[1,1,1]]` |
+| `WRrP0b` | | rename topic | `[[["topicId",[courseId]],"new name"],[1],[1,1,1]]` |
+| `EjPfY` | | delete topic | `[["topicId",[courseId]]]` |
+| `CVt8yf` | `hrw.sub` | write a draft grade | see "Submissions and draft grades" |
 | `o5pSDe` | | sent by the People page; **not the roster** — it returned `[]` for a class that has a student (probably pending invitations) | `[[courseId],100,null,[1,null,1]]` |
 | `UG41I` | `hrq.usr` | user profiles (name, email, photo) by user id | see "Roster" |
 | `dpT4Vd` | `hrcw.qr` | list classwork, one section at a time | see "Listing classwork" |
@@ -95,6 +99,18 @@ then shows `[2,[teacherUserId],publishTimeMs]`.
    and returns an attachment id.
 3. The following `F7Tqub` lists it inside the item as
    `[[null,[[itemId,[courseId]],attachmentId]]]`.
+
+Replayed: a draft with the form attached was created, the attachment was read
+back in the listing (`item[27][0][4]`, one entry) and the draft was deleted.
+
+**Which link counts as a form (replayed).** `u1xGoc` answers type `7` with the
+Drive id only for a link that contains the form's file id:
+`…/forms/d/<fileId>/edit` or `…/forms/d/<fileId>/viewform`. For the public
+responder link `…/forms/d/e/<long id>/viewform` of the same form it answers
+type `4` — a plain web link, no Drive id, a `webthumbnail` picture — although
+it still returns the form's title. The library refuses that link with an
+explanation instead of attaching the form as a web link. The responder link
+of a form is in slot 6 of the type-7 answer.
 
 ### Topic and due date of an assignment
 
@@ -150,27 +166,192 @@ outside a browser**, against a class with one student.
 `section = ["topicId", [courseId]], flag = 0`. The web app sends one call per
 section with `pageSize = 10`; `100` was replayed and accepted. The reply is
 `["hrcw.qr", [hasMore], [[2, [streamItem, coursework, …]], …]]`, newest first;
-an empty section has no third element. A read-back item does **not** carry its
-topic, so the topic has to come from the section it was listed in. Paging past
-the first page was not captured (the library raises if `hasMore` is true).
+an empty section has no third element. Paging past the first page was not
+captured (the library raises if `hasMore` is true).
 
-## Deleting an assignment
+What a listed envelope carries (read back for a draft made with 7 points, a
+due date with a time, a topic and one link attachment):
+
+```
+coursework  [dueMs, <a timestamp>, dueHasTime, points, false, 1, [1], …]
+item[14]    [["topicId", ["courseId"]]]                      # null without a topic
+item[27][0][4]  [[null, [["itemId", ["courseId"]], "attachmentId"]]]   # null without attachments
+```
+
+The library takes an item's topic from the section it was listed in and falls
+back to `item[14]` for stream queries. Only the attachment id comes back, not
+what the attachment points at.
+
+## An update replaces the whole item
+
+`F7Tqub` with the ordinary update masks writes every field it covers, so
+whatever is not sent again is cleared. Replayed: a draft with a topic, a link
+attachment, instructions, a due date and 7 points was updated with nothing but
+a new title — afterwards the topic, the attachment, the instructions and the
+due date were gone and the points were back at 100. Sending the same
+attachment ids again keeps the attachments (replayed), which is what the web
+app does on every save. The public `Classroom.update_*` and `publish` methods
+therefore read the item first and send everything back.
+
+## Write statuses: a refused write still answers HTTP 200
+
+The reply to `n5NjMc` and `F7Tqub` is `["hrsi.ur", [[status, envelope], …]]`,
+one pair per item sent. `[0]` is success. A refusal comes back as HTTP 200
+with a normal-looking reply whose status is not `[0]` — seen: `[13,"generic"]`
+— and the item is left exactly as it was. The envelope in a refused reply is
+just the request echoed back. So the status has to be checked; the library
+raises `StreamItemRejected`. (Earlier versions did not check it and reported a
+refused delete as done.)
+
+## Deleting a stream item
 
 There is no separate delete RPC. The Classwork "delete" menu sends `F7Tqub`
 with the stream item's slot **8** set to `3` (live items have `2`) and masks
 that write only that field:
 `[[[null,null,null,null,null,1],[]], [[null,null,null,null,null,1]], [[null,null,null,null,null,1],[]], null, null, [[null,null,null,null,null,1]]]`.
-Replayed with a minimal item (id only, empty title): drafts and assignments
-disappeared from the `dpT4Vd` listing afterwards.
+Unlike an ordinary update, the arguments end after the fifth:
+`[envelope, deleteMasks, READ_MASKS, null, [1,1,1]]`.
 
-## Submissions
+The web app sends the whole item it has. Replayed with a minimal item (id only,
+empty title) in the item's own envelope: assignments, materials, announcements
+and short-answer questions disappeared from the listings afterwards.
+
+**Questions are the exception.** The question block in the envelope has to be
+of the question's own type, or the delete is refused with status
+`[13,"generic"]` (replayed in both directions: a short-answer block against a
+multiple-choice question, and the reverse). Only the type counts:
+`[2,null,[[]]]` with no choices deletes a multiple-choice question. Since the
+type cannot be told from the id, the library sends the short-answer form and,
+if that is refused, the multiple-choice form.
+
+## Submissions and draft grades
 
 The gradebook calls `Zj93ge` once per assignment:
 `[[100,null,1,0], mask, [null,[[itemId,[courseId]]]], 0]` (mask in
-`web/classroom.py`). Replayed for three published assignments; each answered
-`["hrq.sub",[false]]` — no records — while the gradebook showed the student as
-"assigned, no grade". The student had not opened or turned in anything, so a
-**populated record has never been seen**; its layout is unknown.
+`web/classroom.py`). The reply is `["hrq.sub", [hasMore], [record, …]]`; the
+third element is missing when no student has a record. A student gets a record
+only once something happened to their work — a student who was merely assigned
+the work is absent (the gradebook shows "assigned").
+
+Typing a number into a gradebook cell sends `CVt8yf`:
+
+```
+[[3], [[ref, record, [null,null,null,1]]], readMask]
+ref    = [studentId, [itemId, [courseId]]]
+record = [ref, null×8, draftGrade]        # set   (the grade is slot 9)
+record = [ref]                            # clear (emptying the cell)
+```
+
+and is answered with `["hrw.sub", [record]]`. A record, as returned after a
+draft grade was set to 7, changed to 8 and cleared:
+
+| Slot | Meaning |
+|---|---|
+| `0` | `[studentId, [itemId, [courseId]]]` |
+| `2` | last update, ms |
+| `5` | a state code; `4` in every record seen (work with a teacher's draft grade, never turned in). Other values not observed |
+| `7` | `[studentId]` |
+| `9` | draft grade, or null |
+| `19` | history: `[[state, ms, [actorId], 1, null, 5], null, 1]` for a state change, `[null, [grade, maxPoints, ms, [actorId], null, 1, n], 2]` for each grade change (grade null when cleared) |
+
+Not seen: a record of work that was opened, turned in or returned, and where
+the returned ("assigned") grade sits. Returning work was not captured — it
+notifies the student.
+
+## Stream item kinds
+
+`n5NjMc` (create) and `F7Tqub` (update) carry the item in a tagged envelope,
+and listings return the same envelope:
+
+```
+assignment    [2, [item, coursework, null, null, [2,2]]]
+announcement  [3, null, [item]]
+question      [5, null, null, [item, coursework, questionBlock]]
+material      [7, null, null, null, null, [item]]
+```
+
+The item is the same 28-slot record for all four. An announcement has an
+empty title and its words in the body (`item[27][0]`), exactly where an
+assignment keeps its instructions; on read-back the text is at
+`item[27][0][6][1]`. Captured for all four as drafts (typing into a composer
+saves a draft at once). Creating, listing and deleting drafts of every kind
+was replayed. **Publishing** an announcement, a material or a question was not
+captured from the web app: the library sends the same `F7Tqub` update it uses
+to publish an assignment, with that kind's envelope and the item state set to
+`2`. Replayed for all three (and for both question types): the item came back
+published (state 2) in the listings, questions also as gradebook columns, and
+deleting the published item removed it.
+
+## Questions
+
+A question's coursework block is an assignment's with `[2]` instead of `[1]`
+in slot 6. The question block is
+
+```
+[1, []]                          short answer
+[2, null, [["choice", …]]]       multiple choice (one answer)
+```
+
+The composer first creates a short-answer draft (`n5NjMc`, 1082 characters)
+and turns it into multiple choice with an update (`F7Tqub`, 1568 characters);
+the library's requests are the same length and start the same. Creating a
+multiple-choice question in one `n5NjMc` was replayed and read back. In a
+listing (`dpT4Vd`) a question comes back in the same envelope with its block,
+so the choices can be read from it.
+
+The three checkboxes of the composer ("students can reply to each other",
+"students can edit their answer", "students can see the class summary") were
+left at their defaults; where they are encoded is not known. Students'
+answers to a question have not been seen.
+
+## Renaming and deleting a topic
+
+`WRrP0b [[["topicId",[courseId]],"new name"],[1],[1,1,1]]` renames and
+`EjPfY [["topicId",[courseId]]]` deletes, both captured from the topic's menu
+and replayed (create, rename, read back, delete, gone). Deleting a topic that
+still has a post under it keeps the post: it is listed in the "no topic"
+section afterwards with `item[14]` empty (replayed with a draft).
+
+## Link attachments
+
+The composer's "link" button: `u1xGoc ["url"]`, then `n5QGnd` with the
+descriptor `[null, null, url, 4, null×16, 1]` (kind 4; a Form is kind 7 with
+its Drive id), then `F7Tqub` listing the returned attachment id in the body:
+`[null, uuid, null, null, [[null, [[itemId,[courseId]], attachmentId]]]]` when
+the item has no text. Captured on a material; replayed on a material draft and
+on an assignment draft (one attachment read back each time). The listing's
+mask returns the attachment reference only, not the link itself.
+
+## Stream queries
+
+`pONvgf` — `[[pageSize,null,1,0], READ_MASKS, [[lifecycle, [[courseId]], kinds, states]]]`,
+answered `["hrsi.qr", [hasMore], [envelope, …]]`. Filters seen:
+
+| Used by | lifecycle | kinds | states |
+|---|---|---|---|
+| Stream page feed | `[2,3]` | null (all) | `[2]` published |
+| its drafts drawer | `[2]` | `[3]` announcements | `[3]` drafts |
+| gradebook columns | `[2]` | `[2,5]` | `[2]` |
+
+`lifecycle` filters on the item's slot 8 (replayed): `[2]` returns live items
+only, `[3]` only deleted ones, `[2,3]` both. So the Stream page's own query
+keeps returning a post after it was deleted, marked `3`; the library asks for
+`[2]`. `kinds` are the envelope tags (2 assignment, 3 announcement, 5 question,
+7 material) and `states` the item state (2 published, 3 draft). Classwork
+listings (`dpT4Vd`) do not return deleted items.
+
+## Listing the user's courses
+
+The home page sends `gXtzob` at start-up with the query
+`[[null,[[1]]], null, null, [1,2,3], null, null, [1,2]]` and paging
+`[100,null,1,0]` (single-course reads put `[null, [[courseId]], …]` there).
+The reply has the same shape as a single-course read, `["hrq.crs", […], [course, …]]`,
+with id, name and section at slots 0, 5 and 8. The mask it uses does not return
+the student list.
+
+Start-up requests like this one cannot be seen by a hook installed after the
+page loads. They were captured by loading the page in a hidden same-origin
+iframe and patching its `fetch` before the app's scripts ran.
 
 ## Assigning to individual students (not solved)
 
@@ -186,11 +367,9 @@ two students.
 ## Not captured yet
 
 * Assigning to individual students (see above) — needs two students.
-* A populated submission record, and turning work in / returning / grading —
-  needs a student who has opened or turned in work.
-* Listing the teacher's courses: the web app loads them once at start-up, before
-  any hook can see the request. A course id can be read from any course link
-  (`course_id_from_url`).
+* Submission records of work that was opened, turned in or returned, and
+  returning work — needs a student who turns work in.
+* Students' answers to a question, and the question composer's three checkboxes.
 * Quiz assignments, grade import, marking a single piece of work as missing or done.
 * The other class settings in the same record (overall grade calculation, grade categories, stream options).
 * Drive file attachments other than Forms, and how Classroom shares them.

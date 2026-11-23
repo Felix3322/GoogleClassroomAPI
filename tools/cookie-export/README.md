@@ -38,7 +38,7 @@ and delete it once the tests are done.
      account in this Chrome profile, then export again.
    - **red `err` / `0`** — nothing was read.
 
-Then give me the file's path — not its contents.
+Then pass the file's path to the library: `Classroom.from_cookie_file("…/gca-cookies.txt")`.
 
 ## Why per-URL, not per-domain
 

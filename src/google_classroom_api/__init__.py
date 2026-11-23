@@ -32,7 +32,7 @@ from .auth import OAuthClient, TokenManager, TokenSet
 from .backends import (AssignmentResult, ClassroomBackend, FormsBackend, FormSync, ResolvedSlot,
                        ResponseData, ResponseMeta, StudentInfo, SubmissionInfo)
 from .classroom import ClassroomApi
-from .cookie_classroom import Classroom, course_id_from_url
+from .cookie_classroom import UNCHANGED, Classroom, course_id_from_url
 from .drive import DriveApi
 from .errors import (AccessMismatch, ClassroomAPIError, GoogleApiError, NotLinked, ReauthRequired,
                      RecipientError, UncertainOutcome)
@@ -42,9 +42,12 @@ from .oauth_backends import OAuthClassroomBackend, OAuthFormsBackend
 from .pipeline import ALL_STUDENTS, Pipeline, PublishResult, judge
 from .store import Store
 from .transport import GoogleSession
+from .web.classroom import StreamItemRejected
+from .web.session import WebProtocolError, WebSession
 
 __all__ = [
-    "Classroom", "course_id_from_url",
+    "Classroom", "UNCHANGED", "course_id_from_url",
+    "WebSession", "WebProtocolError", "StreamItemRejected",
     "Choice", "Lesson", "Question", "Section",
     "Store", "Pipeline", "PublishResult", "ALL_STUDENTS", "judge",
     "FormsBackend", "ClassroomBackend", "FormSync", "ResolvedSlot", "ResponseData", "ResponseMeta",

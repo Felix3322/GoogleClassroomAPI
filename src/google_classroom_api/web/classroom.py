@@ -1,9 +1,9 @@
 """Google Classroom through the web app's private RPCs.
 
-Only calls that were captured from the real web app are implemented, and the
-docstrings say which ones were also replayed by hand. Assigning to individual
-students and reading submissions are missing: the capture class had no
-students. See ``docs/private-classroom-protocol.md``.
+Calls are built from requests captured from the real web app; the docstrings
+and ``docs/private-classroom-protocol.md`` say which were also replayed outside
+a browser and which parts are inferred. Assigning to individual students is
+missing: the web app only expresses it in a class with two or more students.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ import json
 import re
 import secrets
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional, Sequence
 
 from .session import WebProtocolError, WebSession, strip_xssi
@@ -23,6 +23,8 @@ DRIVE_KIND_FORM = 7
 
 STATE_PUBLISHED = 2
 STATE_DRAFT = 3
+
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 # Field masks exactly as the web app sends them. The server rejects the
 # stream-item calls when they are left out.
@@ -127,13 +129,16 @@ def stream_item(
     item[15] = 1
     item[25] = [0]
     body: list = [None, client_uuid or str(uuid.uuid4()).upper()]
-    if instructions or attachment_ids:
+    attachments = (
+        [[None, [[item_id, [course_id]], attachment]] for attachment in attachment_ids]
+        if attachment_ids else None
+    )
+    if instructions:
         text = ["edu.rt", instructions]
-        attachments = (
-            [[None, [[item_id, [course_id]], attachment]] for attachment in attachment_ids]
-            if attachment_ids else None
-        )
         body += [None, text, attachments, None, ["edu.rt", instructions, None, None, [None, instructions]]]
+    elif attachments:
+        # No text: the web app stops after the attachment list (captured from a material).
+        body += [None, None, attachments]
     item[27] = [body]
     return item
 
@@ -148,7 +153,8 @@ def due_fields(due: Optional[datetime], has_time: bool = True) -> tuple[Optional
         return None, 0
     if due.tzinfo is None:
         raise ValueError("due must be a timezone-aware datetime")
-    return int(due.timestamp() * 1000), 1 if has_time else 0
+    # whole milliseconds by integer arithmetic: a float timestamp can come out 1 ms short
+    return (due - _EPOCH) // timedelta(milliseconds=1), 1 if has_time else 0
 
 
 def assignment_wrapper(
@@ -169,18 +175,312 @@ def update_arguments(item: list, points: int = 100, **due) -> list:
             None, None, None, None, None, None, [1, 1, None, 1]]
 
 
-def delete_arguments(course_id: int, item_id: int) -> list:
+def delete_arguments(course_id: int, item_id: int, kind: str = "assignment", *,
+                     multiple_choice: bool = False) -> list:
     """F7Tqub arguments that delete one stream item.
 
     Same envelope as :func:`update_arguments`, but the masks write only the
     item's lifecycle field, which is set to :data:`ITEM_DELETED`. The masks and
     slot 8 match the request the web app's "delete" menu sent; the other fields
     of the item are ignored by the server (replayed: a minimal item deletes).
+
+    A question is the exception: its question block has to be of the question's
+    own type or the server refuses the delete (replayed: status 13 and the
+    question stays). ``multiple_choice`` picks the block; the choices themselves
+    are not needed.
     """
     item = stream_item(int(course_id), "", item_id=int(item_id))
     item[8] = ITEM_DELETED
-    return [assignment_wrapper(item), DELETE_MASKS, READ_MASKS, None, [1, 1, 1],
+    if kind == KIND_ASSIGNMENT:
+        wrapper = assignment_wrapper(item)
+    elif kind == KIND_QUESTION:
+        wrapper = question_wrapper(item)
+        if multiple_choice:
+            wrapper[0][3][2] = [QUESTION_MULTIPLE_CHOICE, None, [[]]]
+    else:
+        wrapper = item_wrapper(kind, item)
+    return [wrapper, DELETE_MASKS, READ_MASKS, None, [1, 1, 1]]
+
+
+# --- stream item kinds ----------------------------------------------------------------
+#
+# n5NjMc (create) and F7Tqub (update) carry one stream item inside a tagged
+# envelope; listings return the same envelope. Captured from the web app:
+#   assignment    [2, [item, coursework, null, null, [2, 2]]]
+#   announcement  [3, null, [item]]
+#   question      [5, null, null, [item, coursework, questionBlock]]
+#   material      [7, null, null, null, null, [item]]
+
+KIND_ASSIGNMENT = "assignment"
+KIND_ANNOUNCEMENT = "announcement"
+KIND_QUESTION = "question"
+KIND_MATERIAL = "material"
+_KIND_SLOTS = {KIND_ASSIGNMENT: (2, 1), KIND_ANNOUNCEMENT: (3, 2), KIND_QUESTION: (5, 3), KIND_MATERIAL: (7, 5)}
+_KIND_OF_TAG = {tag: kind for kind, (tag, _slot) in _KIND_SLOTS.items()}
+
+QUESTION_SHORT_ANSWER = 1
+QUESTION_MULTIPLE_CHOICE = 2
+
+
+def item_wrapper(kind: str, item: list) -> list:
+    """The tagged envelope of an announcement or a material (see above)."""
+    if kind in (KIND_ASSIGNMENT, KIND_QUESTION):
+        raise ValueError(f"a {kind} carries a coursework block; use {kind}_wrapper")
+    tag, slot = _KIND_SLOTS[kind]
+    entry: list = [tag] + [None] * slot
+    entry[slot] = [item]
+    return [entry]
+
+
+def question_block(choices: Sequence[str] = ()) -> list:
+    """The question settings as the composer sends them with its default checkboxes.
+
+    ``[1, []]`` is a short-answer question; ``[2, null, [[choice, …]]]`` a
+    multiple-choice one (one answer may be picked). The checkboxes ("students
+    can reply to each other", "students can edit their answer", "students can
+    see the class summary") were left at their defaults in the capture; where
+    they are encoded is not known.
+    """
+    if choices:
+        return [QUESTION_MULTIPLE_CHOICE, None, [list(choices)]]
+    return [QUESTION_SHORT_ANSWER, []]
+
+
+def question_wrapper(item: list, points: int = 100, choices: Sequence[str] = (), *,
+                     due_ms: Optional[int] = None, due_has_time: int = 0) -> list:
+    """The envelope of a question: like an assignment's, with work type 2 and a question block."""
+    coursework = [due_ms, None, due_has_time if due_ms is not None else 0, points, 0, 1, [2],
+                  None, None, [None, 0], None, 0]
+    return [[5, None, None, [item, coursework, question_block(choices)]]]
+
+
+def create_question_arguments(item: list, points: int = 100, choices: Sequence[str] = (), **due) -> list:
+    return [question_wrapper(item, points, choices, **due), READ_MASKS, None, [1, 1, 1],
+            None, None, None, None, None, [1, 1, None, 1]]
+
+
+def update_question_arguments(item: list, points: int = 100, choices: Sequence[str] = (), **due) -> list:
+    return [question_wrapper(item, points, choices, **due), UPDATE_MASKS, READ_MASKS, None, [1, 1, 1],
             None, None, None, None, None, None, [1, 1, None, 1]]
+
+
+def entry_choices(entry: list) -> Optional[list]:
+    """The answer choices of a multiple-choice question entry, or None."""
+    if entry[0] != _KIND_SLOTS[KIND_QUESTION][0]:
+        return None
+    payload = entry[_KIND_SLOTS[KIND_QUESTION][1]]
+    block = payload[2] if len(payload) > 2 else None
+    if block and block[0] == QUESTION_MULTIPLE_CHOICE and len(block) > 2 and block[2]:
+        return list(block[2][0])
+    return None
+
+
+def create_item_arguments(kind: str, item: list) -> list:
+    """n5NjMc arguments for a new announcement or material draft."""
+    return [item_wrapper(kind, item), READ_MASKS, None, [1, 1, 1],
+            None, None, None, None, None, [1, 1, None, 1]]
+
+
+def update_item_arguments(kind: str, item: list) -> list:
+    """F7Tqub arguments that rewrite an announcement or a material."""
+    return [item_wrapper(kind, item), UPDATE_MASKS, READ_MASKS, None, [1, 1, 1],
+            None, None, None, None, None, None, [1, 1, None, 1]]
+
+
+def _item_text(stream: list) -> str:
+    """The plain text of a stream item's body (instructions / announcement text), if any."""
+    try:
+        body = stream[27][0]
+    except (IndexError, TypeError):
+        return ""
+    for slot in (6, 3):
+        if len(body) > slot and body[slot] and len(body[slot]) > 1 and isinstance(body[slot][1], str):
+            return body[slot][1]
+    return ""
+
+
+def entry_details(entry: list) -> dict:
+    """Points, due date, attachments and topic of one envelope from a listing.
+
+    Layout read from the real Classwork listing: the coursework block of an
+    assignment or a question starts ``[dueMs, <a timestamp>, dueHasTime,
+    points, …]``; the item's body lists its attachments as
+    ``[null, [[itemId, [courseId]], attachmentId]]``; the item's slot 14 holds
+    ``[[topicId, [courseId]]]``. ``due`` comes back as an aware UTC datetime.
+    Envelopes that were cut short (or kinds without a coursework block) give
+    ``None`` / an empty list.
+    """
+    kind, stream = entry_kind_and_item(entry)
+    details: dict = {"points": None, "due": None, "due_has_time": False, "attachment_ids": [], "topic_id": None}
+    if kind in (KIND_ASSIGNMENT, KIND_QUESTION):
+        payload = entry[_KIND_SLOTS[kind][1]]
+        block = payload[1] if len(payload) > 1 and isinstance(payload[1], list) else []
+        if len(block) > 3:
+            details["points"] = block[3]
+            if block[0] is not None:
+                details["due"] = _EPOCH + timedelta(milliseconds=int(block[0]))
+                details["due_has_time"] = bool(block[2])
+    body = stream[27][0] if len(stream) > 27 and stream[27] else None
+    if body and len(body) > 4 and body[4]:
+        details["attachment_ids"] = [str(attachment[1][1]) for attachment in body[4]]
+    if len(stream) > 14 and stream[14]:
+        details["topic_id"] = str(stream[14][0][0])
+    return details
+
+
+def entry_kind_and_item(entry: list) -> tuple[str, list]:
+    """``(kind, streamItem)`` of one tagged envelope from a listing."""
+    tag = entry[0]
+    kind = _KIND_OF_TAG.get(tag)
+    if kind is not None:
+        return kind, entry[_KIND_SLOTS[kind][1]][0]
+    for part in entry[1:]:  # a kind not named above (e.g. a question): first payload found
+        if isinstance(part, list) and part and isinstance(part[0], list):
+            return f"type-{tag}", part[0]
+    raise WebProtocolError(f"stream entry of type {tag!r} has no item")
+
+
+# --- attachments other than Drive files -------------------------------------------------
+
+LINK_KIND = 4
+
+
+def link_descriptor(url: str) -> list:
+    """The 21-slot attachment descriptor the web app sends for a plain link."""
+    return [None, None, url, LINK_KIND] + [None] * 16 + [1]
+
+
+# --- grading ----------------------------------------------------------------------------
+
+# Masks of CVt8yf as the gradebook sent them when a draft grade was typed into a cell.
+_GRADE_WRITE_MASK = [None, None, None, 1]
+_GRADE_READ_MASK = [None, 1, None, 1, 1, None, 1, 1, 1, None, None, None, 1, None, [1], None, None, None,
+                    1, 1, 1, None, None, None, [[1, 1]], [[1, 1]], None, None, None, None, None, 1]
+#: Slot of the draft grade in a submission record.
+SUBMISSION_DRAFT_GRADE_SLOT = 9
+
+
+def submission_ref(course_id: int, item_id: int, student_id: int) -> list:
+    """How a student's submission of one assignment is addressed."""
+    return [int(student_id), [int(item_id), [int(course_id)]]]
+
+
+def draft_grade_arguments(course_id: int, item_id: int, student_id: int, grade: Optional[float]) -> list:
+    """CVt8yf arguments that set, or with ``None`` clear, one student's draft grade.
+
+    Both forms were captured from a gradebook cell: typing a number sends the
+    record with the grade in slot 9; emptying the cell sends the record with
+    nothing but its reference, under the same write mask.
+    """
+    ref = submission_ref(course_id, item_id, student_id)
+    record: list = [ref]
+    if grade is not None:
+        record += [None] * (SUBMISSION_DRAFT_GRADE_SLOT - 1) + [grade]
+    return [[3], [[ref, record, _GRADE_WRITE_MASK]], _GRADE_READ_MASK]
+
+
+def parse_submission(record: list) -> dict:
+    """One submission record as plain fields.
+
+    Layout read from records the real server returned for a student whose work
+    had only a teacher's draft grade: slot 0 the reference, 2 the last update,
+    5 a state code, 9 the draft grade, 19 the history. The state code was ``4``
+    in every record seen; what other values mean (turned in, returned) has not
+    been observed, so it is passed through as a number. The whole record is kept
+    under ``raw``.
+    """
+    try:
+        ref = record[0]
+        history = record[19] if len(record) > 19 and record[19] else []
+        grades = []
+        for entry in history:
+            change = entry[1] if len(entry) > 1 else None
+            if change:
+                grades.append({"grade": change[0], "max_points": change[1], "time_ms": change[2],
+                               "by_user_id": str(change[3][0]) if change[3] else None})
+        return {
+            "student_id": str(ref[0]),
+            "item_id": str(ref[1][0]),
+            "updated_ms": record[2],
+            "state_code": record[5],
+            "draft_grade": record[SUBMISSION_DRAFT_GRADE_SLOT] if len(record) > SUBMISSION_DRAFT_GRADE_SLOT else None,
+            "grade_history": grades,
+            "raw": record,
+        }
+    except (IndexError, TypeError) as exc:
+        raise WebProtocolError(f"unexpected submission record: {exc!r}") from exc
+
+
+# --- topics -----------------------------------------------------------------------------
+
+
+def rename_topic_arguments(course_id: int, topic_id: str, name: str) -> list:
+    """WRrP0b arguments, as the topic menu's "rename" sent them."""
+    return [[[str(topic_id), [int(course_id)]], name], [1], [1, 1, 1]]
+
+
+def delete_topic_arguments(course_id: int, topic_id: str) -> list:
+    """EjPfY arguments, as the topic menu's "delete" sent them."""
+    return [[str(topic_id), [int(course_id)]]]
+
+
+# --- course list ------------------------------------------------------------------------
+
+# gXtzob as the home page sends it at start-up to list the user's courses.
+COURSE_LIST_MASK = [1, 1, None, None, 1, 1, None, 1,
+                    [None, 1, None, 1, None, 1, [1, 1, 1, 1, 1, 1], None, [1], 1, 1, 1, 1, [1, 1], [1, 1]],
+                    1, 1, None, None, 1, None, None, None, None, None, None, [1, 1, 1, 1, 1, 1, 1], 1, None,
+                    None, 1, None, None, None, [1, 1], 1, 1, None, None, 1, 1, 1, 1, None, 1, 1,
+                    [None, None, None, None, 1, 1, None, None, 1, None, None, None, None, None, None, None,
+                     None, 1, 1, 1, 1, 1, 1],
+                    None, [1, 1, 1], [1, 1, None, 1], 1, 1, 1, [[[1, 1, 1], 1], [[[1, 1]]], 1], None, 1, [1, 1],
+                    None, None, 1, None, [None, None, 1], 1]
+COURSE_LIST_QUERY = [[None, [[1]]], None, None, [1, 2, 3], None, None, [1, 2]]
+
+
+def course_list_arguments() -> list:
+    return [[100, None, 1, 0], COURSE_LIST_MASK, COURSE_LIST_QUERY]
+
+
+# --- stream queries (pONvgf) ------------------------------------------------------------
+#
+# Filters captured from the web app, as [lifecycle, [[courseId]], kinds, states]:
+#   the Stream page's feed          [[2, 3], course, null,   [2]]   published items of every kind
+#   its "drafts" drawer             [[2],    course, [3],    [3]]   announcement drafts
+#   the gradebook's columns         [[2],    course, [2, 5], [2]]   published graded work
+#
+# ``lifecycle`` is the item's slot 8: 2 = live, 3 = deleted. Replayed on the real
+# server: [2] returns live items only, [3] only deleted ones, and the feed's
+# [2, 3] both -- a deleted post stays in that answer for good, marked 3 (the web
+# app evidently drops those itself).
+
+
+def stream_query_arguments(course_id: int, lifecycle: list, kinds: Optional[list], states: list,
+                           page_size: int = 100) -> list:
+    return [[page_size, None, 1, 0], READ_MASKS, [[lifecycle, [[int(course_id)]], kinds, states]]]
+
+
+class StreamItemRejected(WebProtocolError):
+    """Classroom answered a create / update / delete of a stream item with an error status.
+
+    The reply to n5NjMc and F7Tqub carries one ``[status, item]`` pair per item
+    sent; ``[0]`` is success. Seen on the real server: ``[13, "generic"]`` for a
+    question delete whose question block had the wrong type — the call itself
+    returned HTTP 200 and the item was left as it was.
+    """
+
+    def __init__(self, rpc_id: str, status: list) -> None:
+        super().__init__(f"Classroom refused {rpc_id} (status {status!r}); nothing was changed")
+        self.status = status
+
+
+def check_item_statuses(rpc_id: str, result: Any) -> None:
+    """Raise :class:`StreamItemRejected` when a stream-item write was refused."""
+    pairs = result[1] if isinstance(result, list) and len(result) > 1 and isinstance(result[1], list) else []
+    for pair in pairs:
+        status = pair[0] if isinstance(pair, list) and pair else None
+        if isinstance(status, list) and status and status[0] not in (0, None):
+            raise StreamItemRejected(rpc_id, status)
 
 
 def parse_batchexecute(text: str, rpc_id: str) -> Any:
@@ -248,6 +548,12 @@ class ClassroomWeb:
             raise WebProtocolError(f"{rpc_id} failed: HTTP {response.status_code}")
         return parse_batchexecute(response.text, rpc_id)
 
+    def write_item(self, rpc_id: str, arguments: Any) -> Any:
+        """A create (n5NjMc) or update (F7Tqub) of a stream item, with its status checked."""
+        result = self.call(rpc_id, arguments)
+        check_item_statuses(rpc_id, result)
+        return result
+
     # --- topics -----------------------------------------------------------------
 
     def list_topics(self, course_id: int) -> list[dict]:
@@ -268,12 +574,24 @@ class ClassroomWeb:
                 return topic
         return self.create_topic(course_id, name)
 
+    def rename_topic(self, course_id: int, topic_id: str, name: str) -> None:
+        """Rename a topic (WRrP0b, captured from the topic menu's "rename"). Replayed."""
+        self.call("WRrP0b", rename_topic_arguments(course_id, topic_id, name))
+
+    def delete_topic(self, course_id: int, topic_id: str) -> None:
+        """Delete a topic (EjPfY, captured from the topic menu's "delete"). Replayed.
+
+        The posts filed under it are kept and fall back to "no topic"
+        (replayed with a draft under the deleted topic).
+        """
+        self.call("EjPfY", delete_topic_arguments(course_id, topic_id))
+
     # --- assignments --------------------------------------------------------------
 
     @staticmethod
     def _item_summary(result: Any) -> dict:
         try:
-            stream = result[1][0][1][1][0]
+            _kind, stream = entry_kind_and_item(result[1][0][1])
             return {"item_id": stream[0][0], "course_id": stream[0][1][0], "title": stream[5],
                     "state": stream[9][0]}
         except (IndexError, TypeError) as exc:
@@ -295,7 +613,7 @@ class ClassroomWeb:
                            topic_id=topic_id)
         due_ms, flag = due_fields(due, due_has_time)
         arguments = create_arguments(item, points, due_ms=due_ms, due_has_time=flag)
-        return self._item_summary(self.call("n5NjMc", arguments))
+        return self._item_summary(self.write_item("n5NjMc", arguments))
 
     def update_assignment(
         self,
@@ -313,8 +631,11 @@ class ClassroomWeb:
     ) -> dict:
         """Rewrite an assignment; with ``publish`` it is assigned to the class. Replayed.
 
-        The call sends the whole assignment, so pass the topic, due date and
-        attachments again or they are cleared.
+        The call sends the whole assignment: what is not passed again is
+        cleared (replayed: an update with only a title removed the topic, the
+        attachment, the instructions and the due date, and reset the points to
+        100). :meth:`Classroom.update_assignment` reads the item first and
+        keeps what you do not change.
         """
         item = stream_item(
             int(course_id), title, item_id=int(item_id), instructions=instructions,
@@ -323,7 +644,7 @@ class ClassroomWeb:
         )
         due_ms, flag = due_fields(due, due_has_time)
         arguments = update_arguments(item, points, due_ms=due_ms, due_has_time=flag)
-        return self._item_summary(self.call("F7Tqub", arguments))
+        return self._item_summary(self.write_item("F7Tqub", arguments))
 
     def delete_assignment(self, course_id: int, item_id: int) -> None:
         """Delete an assignment (draft or published), as the web app's menu does. Replayed.
@@ -331,16 +652,62 @@ class ClassroomWeb:
         The web app sends an F7Tqub update whose masks write only the item's
         lifecycle field, set to "deleted"; the other fields it sends are ignored.
         """
-        self.call("F7Tqub", delete_arguments(course_id, item_id))
+        self.write_item("F7Tqub", delete_arguments(course_id, item_id))
 
-    def list_assignments(self, course_id: int) -> list[dict]:
-        """Every assignment and draft of the class, grouped by topic. Replayed.
+    def delete_item(self, course_id: int, item_id: int, kind: str) -> None:
+        """Delete a stream item of any kind (assignment, material, announcement, question). Replayed.
+
+        A question can only be deleted with a question block of its own type
+        (see :func:`delete_arguments`). The type is not known from the id alone,
+        so the short-answer form is sent first and, when the server refuses it,
+        the multiple-choice form. A refused delete changes nothing (replayed).
+        """
+        if kind != KIND_QUESTION:
+            self.write_item("F7Tqub", delete_arguments(course_id, item_id, kind))
+            return
+        try:
+            self.write_item("F7Tqub", delete_arguments(course_id, item_id, kind))
+        except StreamItemRejected:
+            self.write_item("F7Tqub", delete_arguments(course_id, item_id, kind, multiple_choice=True))
+
+    def delete_question(self, course_id: int, item_id: int) -> None:
+        """Delete a question of either type. Replayed."""
+        self.delete_item(course_id, item_id, KIND_QUESTION)
+
+    @staticmethod
+    def _rows(result: Any, topic_id: Optional[str] = None) -> list[dict]:
+        rows = []
+        for entry in (result[2] if len(result) > 2 and result[2] else []):
+            try:
+                kind, stream = entry_kind_and_item(entry)
+                details = entry_details(entry)
+                row = {"item_id": str(stream[0][0]), "kind": kind, "title": stream[5],
+                       "state": stream[9][0] if stream[9] else None,
+                       "topic_id": topic_id or details["topic_id"], "text": _item_text(stream),
+                       "points": details["points"], "due": details["due"],
+                       "due_has_time": details["due_has_time"],
+                       "attachment_ids": details["attachment_ids"]}
+                if kind == KIND_QUESTION:
+                    row["choices"] = entry_choices(entry)
+                rows.append(row)
+            except (IndexError, TypeError) as exc:
+                raise WebProtocolError(f"unexpected stream item: {exc!r}") from exc
+        return rows
+
+    @staticmethod
+    def _refuse_more(result: Any, what: str) -> None:
+        more = result[1] if len(result) > 1 and isinstance(result[1], list) else [False]
+        if more and more[0] is True:
+            raise WebProtocolError(f"{what} has more than 100 items; "
+                                   "paging past the first 100 has not been reverse-engineered")
+
+    def list_classwork(self, course_id: int) -> list[dict]:
+        """Everything on the Classwork page (assignments, materials, drafts), by topic. Replayed.
 
         The web app lists Classwork one section at a time with dpT4Vd: the
         "no topic" section is ``(null, 1)`` and each topic is
         ``([topicId, [courseId]], 0)``. Items come back newest first within a
-        section; a read-back item does not carry its topic, so ``topic_id`` is
-        taken from the section it was listed in.
+        section. Rows are described in :func:`entry_details`.
         """
         cid = int(course_id)
         sections = [(None, 1, None)] + [([str(t["topic_id"]), [cid]], 0, str(t["topic_id"]))
@@ -348,18 +715,131 @@ class ClassroomWeb:
         rows = []
         for ref, flag, topic_id in sections:
             result = self.call("dpT4Vd", [[100, None, 2, 0], [cid], ref, flag, 2, READ_MASKS])
-            more = result[1] if len(result) > 1 and isinstance(result[1], list) else [False]
-            if more and more[0] is True:
-                raise WebProtocolError("a Classwork section has more than 100 items; "
-                                       "paging past the first 100 has not been reverse-engineered")
-            for entry in (result[2] if len(result) > 2 and result[2] else []):
-                try:
-                    stream = entry[1][0]
-                    rows.append({"item_id": str(stream[0][0]), "title": stream[5],
-                                 "state": stream[9][0] if stream[9] else None, "topic_id": topic_id})
-                except (IndexError, TypeError) as exc:
-                    raise WebProtocolError(f"unexpected stream item: {exc!r}") from exc
+            self._refuse_more(result, "a Classwork section")
+            rows += self._rows(result, topic_id)
         return rows
+
+    def get_item(self, course_id: int, item_id: int) -> Optional[dict]:
+        """One item of the class as a listing row, or None. Replayed.
+
+        There is no captured call that reads a single item, so this looks it up
+        in the Classwork listing and, failing that, among the announcements
+        (drafts first, then posted ones).
+        """
+        wanted = str(item_id)
+        for row in self.list_classwork(course_id):
+            if row["item_id"] == wanted:
+                return row
+        for drafts in (True, False):
+            for row in self.list_announcements(course_id, drafts=drafts):
+                if row["item_id"] == wanted:
+                    return row
+        return None
+
+    def list_assignments(self, course_id: int) -> list[dict]:
+        """Every assignment and assignment draft of the class. Replayed."""
+        return [row for row in self.list_classwork(course_id) if row["kind"] == KIND_ASSIGNMENT]
+
+    # --- questions ------------------------------------------------------------------
+
+    def create_question(self, course_id: int, question: str, *, choices: Sequence[str] = (),
+                        instructions: str = "", points: int = 100, topic_id: Optional[str] = None,
+                        due: Optional[datetime] = None, due_has_time: bool = True) -> dict:
+        """Create a draft question: short answer, or multiple choice when ``choices`` is given.
+
+        The composer creates a short-answer draft and switches it with an
+        update; sending the final question block in the create was replayed.
+        """
+        item = stream_item(int(course_id), question, instructions=instructions, state=STATE_DRAFT,
+                           topic_id=topic_id)
+        due_ms, flag = due_fields(due, due_has_time)
+        arguments = create_question_arguments(item, points, choices, due_ms=due_ms, due_has_time=flag)
+        return self._item_summary(self.write_item("n5NjMc", arguments))
+
+    def update_question(self, course_id: int, item_id: int, question: str, *,
+                        choices: Sequence[str] = (), instructions: str = "", points: int = 100,
+                        attachment_ids: Sequence[int] = (),
+                        topic_id: Optional[str] = None, due: Optional[datetime] = None,
+                        due_has_time: bool = True, publish: bool = False) -> dict:
+        """Rewrite a question; with ``publish`` it is asked to the class. Replayed.
+
+        Like every update, this sends the whole item: what is not passed is cleared.
+        """
+        item = stream_item(int(course_id), question, item_id=int(item_id), instructions=instructions,
+                           state=STATE_PUBLISHED if publish else STATE_DRAFT,
+                           attachment_ids=[int(a) for a in attachment_ids], topic_id=topic_id)
+        due_ms, flag = due_fields(due, due_has_time)
+        arguments = update_question_arguments(item, points, choices, due_ms=due_ms, due_has_time=flag)
+        return self._item_summary(self.write_item("F7Tqub", arguments))
+
+    # --- materials and announcements ------------------------------------------------
+
+    def create_item(self, kind: str, course_id: int, title: str, *, text: str = "",
+                    topic_id: Optional[str] = None) -> dict:
+        """Create a draft material or announcement (n5NjMc with that kind's envelope).
+
+        An announcement has no title: its words go in ``text``.
+        """
+        item = stream_item(int(course_id), title, instructions=text, state=STATE_DRAFT, topic_id=topic_id)
+        return self._item_summary(self.write_item("n5NjMc", create_item_arguments(kind, item)))
+
+    def update_item(self, kind: str, course_id: int, item_id: int, title: str, *, text: str = "",
+                    attachment_ids: Sequence[int] = (), topic_id: Optional[str] = None,
+                    publish: bool = False) -> dict:
+        """Rewrite a material or announcement; the whole item is sent, as for assignments."""
+        item = stream_item(int(course_id), title, item_id=int(item_id), instructions=text,
+                           state=STATE_PUBLISHED if publish else STATE_DRAFT,
+                           attachment_ids=[int(a) for a in attachment_ids], topic_id=topic_id)
+        return self._item_summary(self.write_item("F7Tqub", update_item_arguments(kind, item)))
+
+    def query_stream(self, course_id: int, lifecycle: list, kinds: Optional[list], states: list) -> list[dict]:
+        """Stream items matching a pONvgf filter (see :func:`stream_query_arguments`)."""
+        result = self.call("pONvgf", stream_query_arguments(course_id, lifecycle, kinds, states))
+        self._refuse_more(result, "the stream")
+        return self._rows(result)
+
+    def list_stream(self, course_id: int) -> list[dict]:
+        """Published items of every kind, newest first: what is on the Stream page. Replayed.
+
+        The Stream page itself asks for live *and* deleted items; this asks for
+        live ones only, so that deleted posts are not listed.
+        """
+        return self.query_stream(course_id, [ITEM_LIVE], None, [STATE_PUBLISHED])
+
+    def list_announcements(self, course_id: int, *, drafts: bool = False) -> list[dict]:
+        """Announcements: published ones from the feed, or the saved drafts."""
+        if drafts:
+            return self.query_stream(course_id, [ITEM_LIVE], [3], [STATE_DRAFT])
+        return [row for row in self.list_stream(course_id) if row["kind"] == KIND_ANNOUNCEMENT]
+
+    # --- courses --------------------------------------------------------------------
+
+    def list_courses(self) -> list[dict]:
+        """The signed-in user's courses, as the home page lists them at start-up."""
+        result = self.call("gXtzob", course_list_arguments())
+        rows = []
+        for course in (result[2] if len(result) > 2 and result[2] else []):
+            try:
+                rows.append({"course_id": str(course[0][0]), "name": course[5],
+                             "section": course[8] if len(course) > 8 else None})
+            except (IndexError, TypeError) as exc:
+                raise WebProtocolError(f"unexpected course record: {exc!r}") from exc
+        return rows
+
+    # --- grading --------------------------------------------------------------------
+
+    def set_draft_grade(self, course_id: int, item_id: int, student_id: int,
+                        grade: Optional[float]) -> dict:
+        """Set (or with ``None`` clear) one student's draft grade, as a gradebook cell does.
+
+        A draft grade is visible to teachers only until the work is returned.
+        Returns the submission record the server answers with (``hrw.sub``).
+        """
+        result = self.call("CVt8yf", draft_grade_arguments(course_id, item_id, student_id, grade))
+        try:
+            return parse_submission(result[1][0])
+        except (IndexError, TypeError) as exc:
+            raise WebProtocolError(f"unexpected grade reply: {exc!r}") from exc
 
     # --- class settings -------------------------------------------------------------
 
@@ -412,18 +892,21 @@ class ClassroomWeb:
     # --- submissions ----------------------------------------------------------------
 
     def list_submissions_raw(self, course_id: int, item_id: int) -> list:
-        """Student submission records of one assignment (Zj93ge, as the gradebook calls it).
+        """Raw student submission records of one assignment (Zj93ge, as the gradebook calls it).
 
-        The RPC id and request were captured from the gradebook and replayed; the
-        server answers ``["hrq.sub", [...records, hasMore]]``. In the test class no
-        student had opened or turned in anything, so only the empty answer
-        (``[false]``) has been seen: the layout of a populated record is NOT yet
-        verified, which is why this returns the raw records unparsed.
+        The server answers ``["hrq.sub", [hasMore], [record, …]]``; the third
+        element is missing when no student has a record yet. A student only gets
+        a record once something happened to their work (here: a draft grade), so
+        students who were merely assigned the work are absent.
         """
         result = self.call("Zj93ge", [[100, None, 1, 0], _SUBMISSION_MASK,
                                       [None, [[int(item_id), [int(course_id)]]]], 0])
-        body = result[1] if len(result) > 1 and isinstance(result[1], list) else []
-        return [entry for entry in body if not isinstance(entry, bool)]
+        self._refuse_more(result, "the submission list")
+        return list(result[2]) if len(result) > 2 and result[2] else []
+
+    def list_submissions(self, course_id: int, item_id: int) -> list[dict]:
+        """Submission records of one assignment as plain fields (see :func:`parse_submission`)."""
+        return [parse_submission(record) for record in self.list_submissions_raw(course_id, item_id)]
 
     def get_missing_work_grade(self, course_id: int) -> dict:
         """Whether missing work gets a default grade automatically, and which one."""
@@ -473,7 +956,7 @@ class ClassroomWeb:
     ) -> str:
         """Attach a Drive item to an assignment and return the attachment id.
 
-        Observed in the web app, not replayed by hand yet.
+        Replayed for a Google Form; other Drive files have not been tried.
         """
         descriptor = [None, None, drive_id, kind, mime_type] + [None] * 8 \
             + [[[], None, None, None, [None, 0]]] + [None] * 6 + [1]
@@ -484,9 +967,33 @@ class ClassroomWeb:
         except (IndexError, TypeError) as exc:
             raise WebProtocolError(f"unexpected attachment reply: {exc!r}") from exc
 
+    def attach_link(self, course_id: int, item_id: int, url: str) -> str:
+        """Attach a plain web link to a stream item and return the attachment id.
+
+        Captured from the composer's "link" button: n5QGnd with the link
+        descriptor (kind 4). Pass the returned id in ``attachment_ids`` of the
+        next update, as the web app does, or the attachment is not kept.
+        """
+        arguments = [[link_descriptor(url), None, [[int(item_id), [int(course_id)]]]], [_ATTACHMENT_MASK]]
+        result = self.call("n5QGnd", arguments)
+        try:
+            return result[2][1]
+        except (IndexError, TypeError) as exc:
+            raise WebProtocolError(f"unexpected attachment reply: {exc!r}") from exc
+
     def attach_form(self, course_id: int, item_id: int, form_url: str) -> str:
-        """Attach a Google Form the way the web app does: as a Form, not as a link."""
+        """Attach a Google Form the way the web app does: as a Form, not as a link. Replayed.
+
+        Classroom recognises a form only by a link that contains its file id —
+        ``…/forms/d/<fileId>/edit`` or ``…/forms/d/<fileId>/viewform``. The
+        public responder link (``…/forms/d/e/<long id>/viewform``) resolves as a
+        plain web link (replayed), so it is refused here rather than attached as
+        something else.
+        """
         link = self.resolve_link(form_url)
         if not link["is_form"]:
-            raise WebProtocolError("Classroom did not recognise the link as a Google Form")
+            raise WebProtocolError(
+                "Classroom did not recognise the link as a Google Form. Use the form's own link "
+                "(https://docs.google.com/forms/d/<fileId>/edit); the public responder link "
+                "(…/forms/d/e/…/viewform) is only seen as a web link.")
         return self.attach_drive_item(course_id, item_id, link["drive_id"])

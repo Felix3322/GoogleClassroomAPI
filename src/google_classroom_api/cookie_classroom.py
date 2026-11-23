@@ -383,8 +383,9 @@ class Classroom:
         ``state`` is ``"assigned"``, ``"turned_in"``, ``"returned"`` or
         ``"unsubmitted"``; ``answer`` is a student's answer to a question;
         ``grade`` is what the student sees (set by :meth:`return_work`),
-        ``draft_grade`` what only teachers see. Every student the work was
-        published to has a record.
+        ``draft_grade`` what only teachers see. Students who were in the class
+        when the work was published have a record; one who joined later has
+        none until something happens to their work.
         """
         return self._c.list_submissions(course_id, item_id)
 

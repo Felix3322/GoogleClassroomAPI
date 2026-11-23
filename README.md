@@ -306,7 +306,8 @@ cls.set_missing_work_grade(course, enabled=before["enabled"], percent=before["pe
 - `due`:带时区(UTC)的 `datetime`,没有截止日期时是 `None`;`points` 是满分。资料和公告没有这两项,为 `None`。
 - `attachment_ids`:附件的 id 列表。目前只能读到 id,读不到附件指向的链接。
 
-提交记录(每个学生对每份已发布的作业或提问各有一条,发布后一两秒出现):
+提交记录(作业或提问发布时已经在班里的学生各有一条,发布后一两秒出现。实测在学生进班之前就发布的作业,
+这个学生没有记录,要等老师给他打了分之类的事情发生后才有):
 
 - `state`:`"assigned"` 已布置、`"turned_in"` 已上交、`"unsubmitted"` 学生取消了提交、`"returned"` 老师已发还。
   `state_code` 是服务器的原始编号(依次是 4、2、5、3)。

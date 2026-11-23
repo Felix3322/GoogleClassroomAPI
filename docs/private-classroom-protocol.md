@@ -227,10 +227,13 @@ if that is refused, the multiple-choice form.
 
 ## Submissions: reading, grading, turning in, returning
 
-Every student has one **submission record** per published assignment or
-question. It appears a second or two after the item is published (replayed:
-none 0.2 s after publishing, there at 1.8 s). One call writes it for everybody
-— `CVt8yf` — and what a caller may change depends on who they are.
+A student who is in the class when an assignment or a question is published
+gets a **submission record** for it. It appears a second or two after
+publishing (replayed: none 0.2 s after publishing, there at 1.8 s). An item
+that was published before the student was in the class has no record for
+them (observed: `["hrq.sub",[false]]`) until something happens to their work —
+a teacher typing a draft grade created one. One call writes the record for
+everybody — `CVt8yf` — and what a caller may change depends on who they are.
 
 ### Reading
 

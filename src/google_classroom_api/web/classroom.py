@@ -482,6 +482,14 @@ def return_arguments(course_id: int, item_id: int, student_id: int, grade: Optio
 SUBMISSION_ATTACHMENTS_SLOT = 4
 DRIVE_KIND_FILE = 2
 NEW_DOCUMENT_MIME = "application/vnd.google-apps.document"
+#: Types the "Add or create" menu can create. Docs and Slides were captured; Sheets and
+#: Drawings were replayed with the corresponding type and created the right kind of file.
+NEW_FILE_MIME = {
+    "doc": NEW_DOCUMENT_MIME,
+    "slides": "application/vnd.google-apps.presentation",
+    "sheet": "application/vnd.google-apps.spreadsheet",
+    "drawing": "application/vnd.google-apps.drawing",
+}
 _ATTACHMENTS_MASK = [None, 1]
 ATTACHMENT_KINDS = {LINK_KIND: "link", DRIVE_KIND_FILE: "drive_file", DRIVE_KIND_FORM: "form"}
 
@@ -602,6 +610,90 @@ def parse_submission(record: list) -> dict:
         }
     except (IndexError, TypeError) as exc:
         raise WebProtocolError(f"unexpected submission record: {exc!r}") from exc
+
+
+# --- comments ----------------------------------------------------------------------------
+#
+# Captured 2026-11-23 from the student's assignment page and the teacher's student-work page.
+# One call writes them, jOFnxd [[op], [[ref, comment]], mask]: op 2 adds, op 4 deletes.
+#   class comment     ref = [commentId, [itemId, [courseId]], null, 2]     flag [2]
+#   private comment   ref = [commentId, null, [studentId, [itemId, [courseId]]], 3]   flag [1]
+# (commentId null when adding). They are read with sLc6hf.
+
+COMMENT_CLASS = 2
+COMMENT_PRIVATE = 3
+COMMENT_LIVE = 2
+COMMENT_DELETED = 3
+_COMMENT_ADD = 2
+_COMMENT_DELETE = 4
+_COMMENT_MASK = [1, 1, 1, 1, None, None, [1], 1, None, 3, [1, None, 1]]
+_COMMENT_FLAG = {COMMENT_CLASS: [2], COMMENT_PRIVATE: [1]}
+
+
+def comment_ref(course_id: int, item_id: int, student_id: Optional[int] = None,
+                comment_id: Optional[int] = None) -> list:
+    """Reference of a class comment on an item, or (with ``student_id``) of a private
+    comment on that student's submission."""
+    if student_id is None:
+        return [comment_id, [int(item_id), [int(course_id)]], None, COMMENT_CLASS]
+    return [comment_id, None, submission_ref(course_id, item_id, student_id), COMMENT_PRIVATE]
+
+
+def _comment_record(ref: list, author_id: int, text: str, rich: Optional[str] = None) -> list:
+    return [ref, None, None, None, [int(author_id)], None, None, None, _COMMENT_FLAG[ref[3]], None, None,
+            ["edu.rt", text, None, None, [None, text if rich is None else rich]]]
+
+
+def add_comment_arguments(course_id: int, item_id: int, author_id: int, text: str,
+                          student_id: Optional[int] = None) -> list:
+    """jOFnxd arguments that post a class comment, or a private one with ``student_id``."""
+    ref = comment_ref(course_id, item_id, student_id)
+    return [[_COMMENT_ADD], [[ref, _comment_record(ref, author_id, text)]], _COMMENT_MASK]
+
+
+def delete_comment_arguments(course_id: int, item_id: int, comment: dict) -> list:
+    """jOFnxd arguments that delete a comment (``comment`` as :func:`parse_comment` returns it).
+
+    The web app sends the whole comment back, with the formatted text it had read.
+    """
+    student = int(comment["student_id"]) if comment["student_id"] else None
+    ref = comment_ref(course_id, item_id, student, int(comment["comment_id"]))
+    record = _comment_record(ref, int(comment["author_id"]), comment["text"], comment["html"])
+    return [[_COMMENT_DELETE], [[ref, record]], _COMMENT_MASK]
+
+
+def list_comments_arguments(course_id: int, item_id: int, student_id: Optional[int] = None,
+                            include_deleted: bool = False, page_size: int = 100) -> list:
+    """sLc6hf arguments: the class comments of an item, or the private ones of one submission."""
+    states = [COMMENT_LIVE, COMMENT_DELETED] if include_deleted else [COMMENT_LIVE]
+    if student_id is None:
+        query = [[None, None, states], [[int(item_id), [int(course_id)]]], None, None, [_COMMENT_FLAG[COMMENT_CLASS]]]
+    else:
+        query = [[None, None, states], None, None, [submission_ref(course_id, item_id, student_id)],
+                 [_COMMENT_FLAG[COMMENT_PRIVATE]]]
+    return [[page_size, None, 1, 0], _COMMENT_MASK, query]
+
+
+def parse_comment(record: list) -> dict:
+    """One comment as plain fields (layout read from real replies)."""
+    try:
+        ref = record[0]
+        block = record[11] if len(record) > 11 and record[11] else []
+        private = ref[3] == COMMENT_PRIVATE
+        return {
+            "comment_id": str(ref[0]),
+            "kind": "private" if private else "class",
+            "student_id": str(ref[2][0]) if private and ref[2] else None,
+            "author_id": str(record[4][0]) if record[4] else None,
+            "text": block[1] if len(block) > 1 else "",
+            "html": block[4][1] if len(block) > 4 and block[4] and len(block[4]) > 1 else None,
+            "created_ms": record[1],
+            "updated_ms": record[2],
+            "deleted": record[7] == COMMENT_DELETED,
+            "raw": record,
+        }
+    except (IndexError, TypeError) as exc:
+        raise WebProtocolError(f"unexpected comment record: {exc!r}") from exc
 
 
 # --- topics -----------------------------------------------------------------------------
@@ -1072,6 +1164,39 @@ class ClassroomWeb:
         submission record the server answers with.
         """
         return self._write_submission(return_arguments(course_id, item_id, int(student_id), grade))
+
+    # --- comments -----------------------------------------------------------------------
+
+    def add_comment(self, course_id: int, item_id: int, text: str,
+                    student_id: Optional[int] = None) -> dict:
+        """Post a class comment on an item, or with ``student_id`` a private comment on that
+        student's submission (a student passes their own id, a teacher the student's). Replayed."""
+        arguments = add_comment_arguments(course_id, item_id, int(self.own_user_id()), text, student_id)
+        result = self.call("jOFnxd", arguments)
+        try:
+            return parse_comment(result[1][0])
+        except (IndexError, TypeError) as exc:
+            raise WebProtocolError(f"unexpected comment reply: {exc!r}") from exc
+
+    def list_comments(self, course_id: int, item_id: int, student_id: Optional[int] = None, *,
+                      include_deleted: bool = False) -> list[dict]:
+        """The class comments of an item, or the private ones of one submission, newest first
+        (the order the server lists them in). Replayed."""
+        result = self.call("sLc6hf", list_comments_arguments(course_id, item_id, student_id, include_deleted))
+        self._refuse_more(result, "the comment list")
+        return [parse_comment(record) for record in (result[2] if len(result) > 2 and result[2] else [])]
+
+    def delete_comment(self, course_id: int, item_id: int, comment_id: str,
+                       student_id: Optional[int] = None) -> dict:
+        """Delete one comment by its id. Teachers still see deleted comments. Replayed."""
+        found = [c for c in self.list_comments(course_id, item_id, student_id) if c["comment_id"] == str(comment_id)]
+        if not found:
+            raise LookupError(f"no comment {comment_id} there")
+        result = self.call("jOFnxd", delete_comment_arguments(course_id, item_id, found[0]))
+        try:
+            return parse_comment(result[1][0])
+        except (IndexError, TypeError) as exc:
+            raise WebProtocolError(f"unexpected comment reply: {exc!r}") from exc
 
     # --- the student's side ---------------------------------------------------------
 

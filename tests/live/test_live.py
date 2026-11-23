@@ -496,6 +496,68 @@ class TestTeacherAndStudent:
             teacher.delete_assignment(course, first)
             teacher.delete_assignment(course, second)
 
+    def test_private_and_class_comments_go_both_ways_and_are_deleted(self, pair):
+        teacher, student = pair
+        course, sid, tid = int(COURSE_ID), student.me()["user_id"], teacher.me()["user_id"]
+        item = teacher.create_assignment(course, f"gca live comments {int(time.time())}", points=1)["item_id"]
+        try:
+            self.wait_for_record(teacher, item)
+            mine = student.add_private_comment(course, item, "From the student.")
+            teacher.add_private_comment(course, item, "From the teacher.", student_id=sid)
+            for seen in (teacher.private_comments(course, item, sid), student.private_comments(course, item)):
+                assert [(c["author_id"], c["text"]) for c in seen] == [
+                    (tid, "From the teacher."), (sid, "From the student.")], "newest first, for both sides"
+            assert student.delete_private_comment(course, item, mine["comment_id"])["deleted"] is True
+            assert [c["text"] for c in student.private_comments(course, item)] == ["From the teacher."]
+            kept = teacher.private_comments(course, item, sid, include_deleted=True)
+            assert sorted((c["text"], c["deleted"]) for c in kept) == [
+                ("From the student.", True), ("From the teacher.", False)], "a teacher still sees deleted ones"
+
+            by_student = student.add_class_comment(course, item, "Class comment by the student.")
+            by_teacher = teacher.add_class_comment(course, item, "Class comment by the teacher.")
+            assert [c["comment_id"] for c in student.class_comments(course, item)] == [
+                by_teacher["comment_id"], by_student["comment_id"]]
+            with pytest.raises(WebProtocolError):     # a student may not delete the teacher's comment
+                student.delete_class_comment(course, item, by_teacher["comment_id"])
+            teacher.delete_class_comment(course, item, by_student["comment_id"])   # a teacher may delete a student's
+            assert [c["text"] for c in teacher.class_comments(course, item)] == ["Class comment by the teacher."]
+        finally:
+            teacher.delete_assignment(course, item)
+
+    def test_new_slides_sheet_and_drawing_are_created_and_attached(self, pair):
+        """Leaves three empty Google files in the test student's Drive."""
+        teacher, student = pair
+        course = int(COURSE_ID)
+        item = teacher.create_assignment(course, f"gca live new files {int(time.time())}", points=1)["item_id"]
+        try:
+            self.wait_for_record(teacher, item)
+            for kind, where in (("slides", "presentation"), ("sheet", "spreadsheets"), ("drawing", "drawings")):
+                made = student.add_new_file(course, item, kind)["attachments"][-1]
+                assert made["kind"] == "drive_file" and made["drive_id"] and f"docs.google.com/{where}/" in made["url"]
+            assert len(student.my_submission(course, item)["attachments"]) == 3
+        finally:
+            teacher.delete_assignment(course, item)
+
+    def test_several_returns_are_sent_one_by_one_because_one_request_for_two_is_refused(self, pair):
+        teacher, student = pair
+        course, sid, stamp = int(COURSE_ID), student.me()["user_id"], int(time.time())
+        first = teacher.create_assignment(course, f"gca live return a {stamp}", points=10)["item_id"]
+        second = teacher.create_assignment(course, f"gca live return b {stamp}", points=10)["item_id"]
+        try:
+            self.wait_for_record(teacher, second)
+            student.turn_in(course, first)
+            student.turn_in(course, second)
+            entries = [cw.return_arguments(course, int(i), int(sid), g)[1][0] for i, g in ((first, 7), (second, None))]
+            with pytest.raises(WebProtocolError):
+                teacher._c.call("CVt8yf", [[3], entries, cw._GRADE_READ_MASK])
+            assert [student.my_submission(course, i)["state"] for i in (first, second)] == ["turned_in"] * 2
+            done = teacher.return_work_many(course, first, {sid: 7})
+            assert [(d["state"], d["grade"]) for d in done] == [("returned", 7)]
+            assert student.my_submission(course, first)["grade"] == 7
+        finally:
+            teacher.delete_assignment(course, first)
+            teacher.delete_assignment(course, second)
+
     def test_the_teacher_cannot_turn_work_in_for_the_student(self, pair):
         teacher, student = pair
         course, sid = int(COURSE_ID), student.me()["user_id"]

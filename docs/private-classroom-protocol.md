@@ -55,7 +55,8 @@ IDs are decimal strings. The course URL `/c/{x}` is the base64 of the course id.
 | `dpT4Vd` | `hrcw.qr` | list classwork, one section at a time | see "Listing classwork" |
 | `Zj93ge` | `hrq.sub` | submission records of one item (the gradebook calls it per item; a student gets their own) | see "Submissions" |
 | `pONvgf` | | published classwork for the gradebook | `[[10,null,1,0], masks…, [[[2],[[courseId]],[2,5],[2]]]]` |
-| `sLc6hf` | `hrq.cmt` | comments | `[[100,null,1,0], mask, [[null,null,[2,3]],[[itemId,[courseId]]],null,null,[[2]]]]` |
+| `sLc6hf` | `hrq.cmt` | read comments | see "Comments" |
+| `jOFnxd` | `hrw.cmt` | post or delete a comment | see "Comments" |
 | `cCzVwf` | `hra.laa` | add-on attachments of an item | `[[100,null,1,0],null, mask, [[itemId,[courseId]]]]` |
 | `t51ITc`, `tQShAc`, `O1Xqee`, `gkSD8b` | | seen on Classwork / home loads; purpose not established | — |
 | `u1xGoc` | `hrq.pau` | resolve a pasted link | `["https://…"]` |
@@ -336,10 +337,75 @@ empty; index 3 of the mask is what returns it (the student-work page asks for
 which is the gradebook's plus index 3 — accepted from teachers and students,
 by item and by reference.
 
+**The other "new" entries.** "New: Slides" was captured too: the same entry
+with `"application/vnd.google-apps.presentation"`. Sheets and Drawings were
+replayed with `…spreadsheet` and `…drawing`; each created a file of the right
+kind (read back as `…punch`, `…ritz`, `…drawing`, opening under
+`docs.google.com/presentation|spreadsheets|drawings/`).
+
+A created file outlives its assignment: after the assignment was deleted, the
+file's id could still be attached to another one (replayed).
+
+**"File" (upload from the computer) is not a Classroom call.** The menu entry
+opens Google Drive's own picker, an iframe served from
+`drive.google.com/picker`; the file is uploaded to Drive there and Classroom
+only receives its Drive id, which it attaches like any existing file. Outside
+a browser the exported cookies do not get into Drive (replayed with an
+export a quarter of an hour old: `drive.google.com/drive/…` answers 302 to the sign-in
+page and the picker 401, while Classroom answers 200), so the upload step
+cannot be done with cookies. A file that is in the student's Drive already can
+be attached by its id.
+
+**Returning several at once.** The call takes a list of `[ref, record, mask]`
+entries, but a request with two "return" entries — two assignments of the same
+student — was refused with error `[13]` and changed nothing. What the web app
+sends when several students of one item are returned could not be captured
+with a class of one student. The library returns one student per request.
+
 After answering a multiple-choice question the page asks for the tally:
 `yMOiof [[null,null,1,0],[[itemId,[courseId]]]]` ->
 `["hrs.ssl", [[[0], itemRef, 2, [[["choice", count], …], itemRef]]]]`.
 It answers teachers too.
+
+## Comments
+
+Captured from the student's assignment page (posting a private comment and a
+class comment, deleting the class comment) and from the teacher's student-work
+page (listing a student's private comments at start-up). All of it was
+replayed for both sides.
+
+```
+jOFnxd  [[op], [[ref, comment]], mask]        op 2 = post, 4 = delete      ->  ["hrw.cmt", [comment]]
+class comment     ref = [commentId, [itemId,[courseId]], null, 2]
+private comment   ref = [commentId, null, [studentId,[itemId,[courseId]]], 3]
+comment = [ref, null, null, null, [authorId], null, null, null, flag, null, null,
+           ["edu.rt", text, null, null, [null, text]]]
+flag    = [2] for a class comment, [1] for a private one
+mask    = [1,1,1,1,null,null,[1],1,null,3,[1,null,1]]
+```
+
+`commentId` is null when posting. To delete, the web app sends the comment
+back as it had read it, i.e. with its id and with the formatted text
+(`<div>…</div>`) in the last slot. A comment as returned:
+`[ref, created, updated, ms, [authorId], null, null, state, flag, "c:…:co:…", null, textBlock]`
+with state `2` live, `3` deleted.
+
+```
+sLc6hf  [[100,null,1,0], mask, filter]        ->  ["hrq.cmt", [hasMore], [comment, …]]   newest first
+class comments of an item        filter = [[null,null,states], [[itemId,[courseId]]], null, null, [[2]]]
+private comments of a submission filter = [[null,null,states], null, null, [[studentId,[itemId,[courseId]]]], [[1]]]
+one comment by reference         sLc6hf [[null,null,2,0], mask, [null,null,[ref]]]
+```
+
+`states` is `[2]` for live comments or `[2,3]` to include deleted ones.
+Replayed:
+
+* a private comment is seen by the student and the teacher, each can add to
+  the thread; a student lists their own thread with the same filter;
+* a deleted comment disappears for the student and is still listed for the
+  teacher when deleted ones are asked for (the web app tells the student so);
+* a student deleting the teacher's class comment is refused (error `[7]`); a
+  teacher can delete a student's.
 
 ## Keeping an exported session alive (it cannot be done)
 
@@ -479,24 +545,39 @@ iframe and patching its `fetch` before the app's scripts ran.
 In a class with one student the "assign to" picker cannot express it: choosing
 that one student re-ticks "All students", so the web app sends the ordinary
 whole-class request. The request for named students therefore has not been
-captured. Probes that put candidate values into stream item slot 25 (the web
-app sends `[0]` there for a whole-class item) were all accepted, but nothing
-showed up on read-back, and with one student "only this student" and "all
-students" cannot be told apart anyway. Capturing it needs a class with at least
-two students.
+captured.
+
+It was looked for by experiment, with the test student as the judge (does
+the student get a submission record and see the item?). Nine spellings of
+stream item slot 25 — which the web app sends as `[0]` — were created and
+published, among them `[1,[[studentId]]]`, `[1,[[someoneElse]]]`,
+`[2,[[studentId]]]`, `[1]` and `[2]`. Every one was accepted, the student saw
+every item including those "for somebody else", and no item read back with
+anything in slot 25 (a whole-class item does not have it either). So slot 25
+is not where the audience lives, or it is ignored without something else that
+is not known. Capturing the real request needs a class with at least two
+students.
 
 ## Not captured yet
 
 * Assigning to individual students (see above) — needs two students.
-* A student uploading a file from the computer, the Drive picker, new Slides / Sheets /
-  Drawings (only "new Docs" was captured), and private comments on a submission.
+* Returning several students of one item in one request — needs two students.
 * The question composer's three checkboxes, and students replying to each other's answers.
-* Returning the work of several students in one call (the web app's list of
-  `[ref, record, mask]` entries has only ever been seen with one).
 * Quiz assignments, grade import, marking a single piece of work as missing or done.
+  ("Import grades" exists on the student-work page of an assignment with a Form but stayed
+  hidden for the test assignment; it would give totals only, never the answers.)
 * The other class settings in the same record (overall grade calculation, grade categories, stream options).
-* Drive file attachments other than Forms, and how Classroom shares them.
+* A teacher attaching Drive files other than Forms, and how Classroom shares them.
+* Paging past the first 100 of anything.
 
 All calls above were replayed **outside a browser with exported cookies** (no
-browser page involved), which works for Classroom: unlike Docs/Forms, its
-endpoints are not bound to the device.
+browser page involved), which works for Classroom: unlike Docs, Forms and
+Drive, its endpoints are not bound to the device. The same cookies sent to
+the other hosts, less than half an hour after the export and while Classroom
+still accepted them: a form's `/edit` opened by its
+owner is redirected to the public `/viewform` page, as for somebody who is not
+signed in; the form's response download answers 401; Drive answers 302 to the
+sign-in page. So the content of a Google Form — its questions as an editor
+sees them and the students' responses — cannot be reached this way. What can
+be collected with cookies alone are answers given in Classroom itself: one
+Classroom question per question, read from the submission records.

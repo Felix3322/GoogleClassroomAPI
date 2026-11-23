@@ -11,7 +11,7 @@ Google 网页端内部的协议(RPC 编号、位置数组、字段掩码、会�
 > 请先用测试账号和测试班级,风险自担。本项目与 Google 无关。
 
 **目录**:[配置](#配置) · [使用](#使用) · [学生这一侧](#学生这一侧和完整的一轮) · [返回值速查](#返回值速查) · [出错时](#出错时) ·
-[验证到什么程度](#验证到什么程度) · [还没做的](#还没做的以及原因) · [测试](#测试)
+[验证到什么程度](#验证到什么程度) · [做不了的和还没做的](#做不了的和还没做的以及原因) · [测试](#测试)
 
 ## 配置
 
@@ -176,7 +176,7 @@ cls.delete_assignment(course, a["item_id"])
   实测 Classroom 不把公开填写链接(`…/forms/d/e/…/viewform`)认作表单,只当普通网页;传了这种链接库会报错并说明原因,
   不会悄悄把表单当成普通链接附上去,也不会留下半成品草稿。
 - 只要日期、不要具体时间的截止日期:传当天 23:59(老师所在时区)那一刻,并加上 `due_has_time=False`。
-- 发给**指定的几个学生**还做不了,见[还没做的](#还没做的以及原因);传 `student_ids` 会直接报错,不会误发给全班。
+- 发给**指定的几个学生**还做不了,见[做不了的和还没做的](#做不了的和还没做的以及原因);传 `student_ids` 会直接报错,不会误发给全班。
 
 ### 提问
 
@@ -235,6 +235,7 @@ cls.delete_assignment(course, quiz["item_id"])
 ```
 
 `return_work(..., grade=9)` 可以一步完成打分和发还;`grade=None` 是不给分数直接发还。
+`return_work_many(course, item_id, {学生 id: 分数, …})` 给一份作业的多名学生发还(每名学生一次请求)。
 `clear_draft_grade` 清掉还没发还的草稿分。
 
 ### 学生这一侧,和完整的一轮
@@ -278,12 +279,39 @@ teacher.delete_question(course, ask["item_id"])
 
 - 学生端的方法只对"自己的"作业起作用。实测老师替学生交作业会被服务器拒绝。
 - 服务器不检查单选题的答案是不是选项之一(实测随便一段文字都会被存下来),所以 `answer_question` 会先核对,不在选项里就报错。
-- 学生可以加的附件:链接(`add_link`)、新建的 Google 文档(`add_new_doc`)、云端硬盘里已有的文件(`add_drive_file`,传文件 id)。
-  `remove_attachment` 按附件 id 移除。从电脑上传文件还没做。
+- 学生可以加的附件:链接(`add_link`)、新建的 Google 文件(`add_new_file`,`"doc"` 文档 / `"slides"` 幻灯片 / `"sheet"` 表格 /
+  `"drawing"` 绘图;`add_new_doc` 是文档的简写)、云端硬盘里已有的文件(`add_drive_file`,传文件 id)。`remove_attachment` 按附件 id 移除。
+- **从电脑上传文件做不了**:网页端的"文件"选项打开的是 Google 云端硬盘自己的上传窗口,文件先传到云端硬盘,Classroom 只拿到文件 id;
+  而导出的 Cookie 在浏览器之外进不了云端硬盘(实测被要求重新登录)。文件如果已经在学生的云端硬盘里,用 `add_drive_file` 按 id 附上即可。
 - 附件要在上交之前加:实测交了之后再加会被服务器拒绝,先 `unsubmit` 才行。
 - `add_drive_file` 只能加学生自己还能编辑的文件;已经随别的作业交上去的文件实测会被拒绝。
 - 老师在学生上交之前就能读到他已经加上的附件。
-- 每次调 `add_new_doc` 都会在学生的云端硬盘里真的新建一份文档;删除作业不会删掉它。
+- 每次调 `add_new_file` / `add_new_doc` 都会在学生的云端硬盘里真的新建一份文件;实测删除作业之后这份文件还在。
+
+### 评论
+
+```python
+talk = teacher.create_assignment(course, "评论示例", points=1)
+time.sleep(3)
+
+# 课程评论:作业下面全班都看得到的评论
+c1 = student.add_class_comment(course, talk["item_id"], "这题要写过程吗?")
+teacher.add_class_comment(course, talk["item_id"], "要写。")
+teacher.class_comments(course, talk["item_id"])            # [{"comment_id", "author_id", "text", …}],新的在前
+teacher.delete_class_comment(course, talk["item_id"], c1["comment_id"])    # 老师可以删学生的评论
+
+# 私下评论:只有这名学生和老师看得到,挂在这名学生的这份作业上
+student.add_private_comment(course, talk["item_id"], "老师,我第 3 题不会。")                # 学生写给老师
+teacher.add_private_comment(course, talk["item_id"], "看课本第 12 页。", student_id=me)     # 老师回给这名学生
+teacher.private_comments(course, talk["item_id"], me)      # 老师读某个学生的私下评论
+mine = student.private_comments(course, talk["item_id"])   # 学生读自己的
+student.delete_private_comment(course, talk["item_id"], mine[-1]["comment_id"])   # 学生删掉自己最早那条
+
+teacher.delete_assignment(course, talk["item_id"])
+```
+
+- 学生删掉的评论,学生自己看不到了,老师加上 `include_deleted=True` 仍然读得到(网页端也是这么告诉学生的)。
+- 学生不能删老师的评论(实测被服务器拒绝)。
 
 ### 缺交作业的默认成绩
 
@@ -305,6 +333,7 @@ cls.set_missing_work_grade(course, enabled=before["enabled"], percent=before["pe
 | `submissions()` / `my_submission()` / `turn_in()` / `unsubmit()` / `answer_question()` / `return_work()` / `set_draft_grade()` | 提交记录:`{"student_id", "item_id", "state", "state_code", "updated_ms", "turned_in_ms", "answer", "answer_type", "attachments", "grade", "draft_grade", "grade_history", "raw"}` |
 | `question_summary()` | `{选项: 选它的人数}` |
 | `me()` | `{"email", "user_id"}` |
+| `class_comments()` / `private_comments()` / `add_*_comment()` / `delete_*_comment()` | 评论:`{"comment_id", "kind", "student_id", "author_id", "text", "html", "created_ms", "updated_ms", "deleted", "raw"}` |
 | `missing_work_grade()` | `{"enabled", "percent"}` |
 
 字段含义:
@@ -316,6 +345,9 @@ cls.set_missing_work_grade(course, enabled=before["enabled"], percent=before["pe
 - `text`:作业和提问的说明、资料的描述、公告的正文。公告没有标题,`title` 是空字符串。
 - `due`:带时区(UTC)的 `datetime`,没有截止日期时是 `None`;`points` 是满分。资料和公告没有这两项,为 `None`。
 - `attachment_ids`:附件的 id 列表。目前只能读到 id,读不到附件指向的链接。
+
+评论:`kind` 是 `"class"`(课程评论)或 `"private"`(私下评论);私下评论的 `student_id` 是它所在的那份作业的学生,
+课程评论为 `None`;`author_id` 是写评论的人;列表按新的在前。
 
 提交记录(作业或提问发布时已经在班里的学生各有一条,发布后一两秒出现。实测在学生进班之前就发布的作业,
 这个学生没有记录,要等老师给他打了分之类的事情发生后才有):
@@ -374,10 +406,11 @@ except WebProtocolError:
 | 公告:新建、修改、发布、列出草稿和已发布的、删除 | `create_announcement` / `update_announcement` / `publish` / `announcements` / `delete_announcement` | 真机验证 |
 | 列出课业(含草稿、分值、截止日期、附件 id),读单条 | `classwork` / `assignments` / `questions` / `materials` / `item` | 真机验证 |
 | 草稿分:打分 / 读回 / 清空 | `set_draft_grade` / `submissions` / `clear_draft_grade` | 真机验证 |
-| 发还作业:带分数 / 沿用草稿分 / 不给分数 | `return_work` | 真机验证 |
+| 发还作业:带分数 / 沿用草稿分 / 不给分数;给多名学生逐个发还 | `return_work` / `return_work_many` | 真机验证(多名学生只在一个学生的班里跑过) |
 | 读每个学生的提交状态、对提问的回答、选项统计 | `submissions` / `question_summary` | 真机验证 |
 | 学生端:读自己的提交、标记完成、取消提交、答简答题和单选题 | `my_submission` / `turn_in` / `unsubmit` / `answer_question` | 真机验证 |
-| 学生端:加链接、新建文档、加云端硬盘文件、移除附件;老师读到学生的附件 | `add_link` / `add_new_doc` / `add_drive_file` / `remove_attachment` / `submissions` | 真机验证 |
+| 学生端:加链接、新建文档 / 幻灯片 / 表格 / 绘图、加云端硬盘文件、移除附件;老师读到学生的附件 | `add_link` / `add_new_file` / `add_drive_file` / `remove_attachment` / `submissions` | 真机验证 |
+| 评论:课程评论和私下评论的发表、列出、删除(老师、学生两边) | `add_class_comment` / `class_comments` / `add_private_comment` / `private_comments` / `delete_*_comment` | 真机验证 |
 | 从导出文件里选用某一个账号 | `account=` / `me` | 真机验证 |
 | 缺交作业默认成绩 开 / 关 / 百分比 | `missing_work_grade` / `set_missing_work_grade` | 真机验证 |
 | 写入被服务器拒绝时报错 | `StreamItemRejected` | 真机验证 |
@@ -385,19 +418,29 @@ except WebProtocolError:
 
 验证用的测试班只有一个学生,所以凡是和"多个学生"有关的行为都没有覆盖到。
 
-## 还没做的,以及原因
+## 做不了的和还没做的,以及原因
 
-- **只发给指定学生。** Classroom 网页端只有在班里至少有两个学生时才能表达"只发给其中几个";
-  测试班只有一个学生,这个请求还没抓到。
-- **学生从电脑上传文件**作为附件,新建幻灯片 / 表格 / 绘图,以及提交上的私下评论。
-- **一次发还多名学生。** 现在一次调用发还一名学生。
-- **提问编辑器里的三个勾选项**(学生可以互相回复 / 可以修改答案 / 可以看全班汇总)保持默认,还不能改。
-- **Google 表单以外的云端硬盘附件**(文档、幻灯片、上传的文件)还没试过。
-- **翻页。** 一个主题分区、信息流、提交记录各自超过 100 条时库会报错,而不是悄悄只返回前 100 条。
-- **导出的 Cookie 无法续期**(实测,见上面"Cookie 的保管和有效期"),长时间运行只能定期重新导出。
-- **Google 表单的内容。** Google 把 Docs/Forms 的编辑会话绑定在设备上,导出的 Cookie 在浏览器之外无法编辑表单、
-  也读不到学生的作答(把现成的表单附到作业上不受此限,因为那走的是 Classroom)。表单部分以后补;
-  仓库里 `forms.py` / `formbuilder.py` / `oauth_backends.py` 是为此保留的官方 API 代码,当前对外接口不依赖它们。
+**用 Cookie 做不了(已实测):**
+
+- **Google 表单的内容。** 用导出不到半小时、Classroom 还照常能用的 Cookie,以表单主人的身份打开编辑页,会被当成没登录、退回到公开填写页;下载作答数据返回 401。
+  所以表单的题目没法编辑、学生在表单里的作答也读不到(把现成的表单附到作业上不受影响,那走的是 Classroom)。
+  **想只靠 Cookie 拿到逐题答案,可以用 Classroom 自带的提问**:一道题发一条提问,学生在 Classroom 里作答,用 `submissions()` 读每个人的答案。
+  仓库里 `forms.py` / `formbuilder.py` / `oauth_backends.py` 是为以后走官方 API 保留的代码,当前对外接口不依赖它们。
+- **学生从电脑上传文件。** 上传发生在 Google 云端硬盘的窗口里,导出的 Cookie 进不了云端硬盘。见"学生这一侧"里的说明。
+- **给导出的 Cookie 续期。** 见"Cookie 的保管和有效期"。
+
+**需要第二个学生才能做:**
+
+- **只发给指定学生。** 网页端只有在班里至少有两个学生时才能表达"只发给其中几个",测试班只有一个学生,真实请求抓不到。
+  也试过直接猜:把条目里疑似"受众"的字段写成九种不同的样子发布出去,服务器全都接受,但学生照样每份都看得到——那个字段不管用。
+  所以传 `student_ids` 仍然会直接报错,不会误发给全班。
+- **一次请求发还多名学生。** 同样抓不到。试过把两份作业的发还放进一个请求,被服务器拒绝;`return_work_many` 因此是每名学生发一次请求。
+
+**还没做:**
+
+- 提问编辑器里的三个勾选项(学生可以互相回复 / 可以修改答案 / 可以看全班汇总)保持默认,还不能改。
+- 老师给作业附表单以外的云端硬盘文件。
+- 翻页:一个主题分区、信息流、提交记录、评论各自超过 100 条时库会报错,而不是悄悄只返回前 100 条。
 
 协议细节和每一项的验证记录见 [`docs/private-classroom-protocol.md`](docs/private-classroom-protocol.md)。
 

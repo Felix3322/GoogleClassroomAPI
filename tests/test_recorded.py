@@ -1231,3 +1231,92 @@ def test_adding_and_removing_keep_the_other_attachments():
     with pytest.raises(LookupError):
         transcript, web = student(reply("Zj93ge", own))
         web.remove_own_attachment(COURSE, ITEM, "12345")
+
+
+# --- recorded: comments ---------------------------------------------------------------------
+#
+# Captured 2026-11-23: the student posting a private comment and a class comment and deleting
+# the class comment (assignment page), and the teacher's student-work page listing a student's
+# private comments at start-up. Replies are the real server's; ids replaced (comments
+# 777777777777 and 888888888888).
+
+COMMENT_MASK = "[1,1,1,1,null,null,[1],1,null,3,[1,null,1]]"
+PRIVATE_COMMENT = ('[["777777777777",null,["444444444444",["222222222222",["111111111111"]]],3],1795403549326,'
+                   '1795403549326,1795403549326,["444444444444"],null,null,2,[1],'
+                   '"c:111111111111:s:222222222222:su:444444444444:co:777777777777",null,["edu.rt",'
+                   '"GCA private comment from the student",null,null,[null,'
+                   '"<div>GCA private comment from the student</div>"]]]')
+CLASS_COMMENT = ('[["888888888888",["222222222222",["111111111111"]],null,2],1795403571112,1795403571112,'
+                 '1795403571112,["444444444444"],null,null,2,[2],"c:111111111111:s:222222222222:co:888888888888",null,'
+                 '["edu.rt","GCA class comment from the student",null,null,[null,'
+                 '"<div>GCA class comment from the student</div>"]]]')
+CLASS_COMMENT_DELETED = CLASS_COMMENT.replace("1795403571112,1795403571112,1795403571112,", "1795403571112,1795403596908,"
+                                              "1795403596772,").replace(",null,null,2,[2],", ",null,null,3,[2],")
+
+
+def test_posting_a_private_comment_equals_the_request_the_students_page_sent():
+    assert envelope("jOFnxd", cw.add_comment_arguments(COURSE, ITEM, STUDENT, "GCA private comment from the student",
+                                                       STUDENT)) == (
+        '[[["jOFnxd","[[2],[[[null,null,' + SENT_REF + ',3],[[null,null,' + SENT_REF + ',3],null,null,null,'
+        '[444444444444],null,null,null,[1],null,null,[\\"edu.rt\\",\\"GCA private comment from the student\\",null,null,'
+        '[null,\\"GCA private comment from the student\\"]]]]],' + COMMENT_MASK + ']",null,"generic"]]]')
+
+
+def test_posting_a_class_comment_equals_the_request_the_students_page_sent():
+    item = "[222222222222,[111111111111]]"
+    assert envelope("jOFnxd", cw.add_comment_arguments(COURSE, ITEM, STUDENT, "GCA class comment from the student")) == (
+        '[[["jOFnxd","[[2],[[[null,' + item + ',null,2],[[null,' + item + ',null,2],null,null,null,[444444444444],null,'
+        'null,null,[2],null,null,[\\"edu.rt\\",\\"GCA class comment from the student\\",null,null,'
+        '[null,\\"GCA class comment from the student\\"]]]]],' + COMMENT_MASK + ']",null,"generic"]]]')
+
+
+def test_listing_private_comments_equals_the_request_the_student_work_page_sent():
+    assert envelope("sLc6hf", cw.list_comments_arguments(COURSE, ITEM, STUDENT, include_deleted=True)) == (
+        '[[["sLc6hf","[[100,null,1,0],' + COMMENT_MASK + ',[[null,null,[2,3]],null,null,[' + SENT_REF + '],[[1]]]]",'
+        'null,"generic"]]]')
+
+
+def test_listing_class_comments_is_the_recorded_query():
+    # As the teacher's page sent it: comment states [2,3] (live and deleted), the item, flag [[2]].
+    assert cw.list_comments_arguments(COURSE, ITEM, include_deleted=True)[2] == [
+        [None, None, [2, 3]], [[ITEM, [COURSE]]], None, None, [[2]]]
+    assert cw.list_comments_arguments(COURSE, ITEM)[2][0] == [None, None, [2]], "live ones only by default"
+
+
+def test_recorded_comment_replies_are_read_as_plain_fields():
+    transcript, web = student(reply("jOFnxd", '["hrw.cmt",[' + PRIVATE_COMMENT + ']]'),
+                              reply("sLc6hf", '["hrq.cmt",[false],[' + CLASS_COMMENT + ']]'))
+    posted = web.add_comment(COURSE, ITEM, "GCA private comment from the student", STUDENT)
+    assert {k: posted[k] for k in ("comment_id", "kind", "student_id", "author_id", "text", "deleted")} == {
+        "comment_id": "777777777777", "kind": "private", "student_id": "444444444444",
+        "author_id": "444444444444", "text": "GCA private comment from the student", "deleted": False}
+    assert posted["html"] == "<div>GCA private comment from the student</div>" and posted["created_ms"] == 1795403549326
+    (listed,) = web.list_comments(COURSE, ITEM)
+    assert (listed["kind"], listed["student_id"], listed["comment_id"]) == ("class", None, "888888888888")
+
+
+def test_deleting_a_comment_equals_the_request_the_students_page_sent():
+    transcript, web = student(reply("sLc6hf", '["hrq.cmt",[false],[' + CLASS_COMMENT + ']]'),
+                              reply("jOFnxd", '["hrw.cmt",[' + CLASS_COMMENT_DELETED + ']]'))
+    gone = web.delete_comment(COURSE, ITEM, "888888888888")
+    assert gone["deleted"] is True and gone["updated_ms"] == 1795403596908
+    ref = "[888888888888,[222222222222,[111111111111]],null,2]"
+    assert rpc_arguments_at(transcript, 2, "jOFnxd") == (
+        "[[4],[[" + ref + ",[" + ref + ",null,null,null,[444444444444],null,null,null,[2],null,null,"
+        '["edu.rt","GCA class comment from the student",null,null,[null,"<div>GCA class comment from the student</div>"]]]]],'
+        + COMMENT_MASK + "]")
+
+
+def test_deleting_a_comment_that_is_not_there_is_a_lookup_error():
+    transcript, web = student(reply("sLc6hf", '["hrq.cmt",[false]]'))
+    with pytest.raises(LookupError):
+        web.delete_comment(COURSE, ITEM, "888888888888")
+
+
+# --- recorded: new files of the other Google types -------------------------------------------
+
+def test_a_new_presentation_equals_the_descriptor_the_students_page_sent():
+    assert cw._dump(cw.submission_file(None, cw.NEW_FILE_MIME["slides"], -10621458850)) == (
+        '[null,null,null,2,"application/vnd.google-apps.presentation",' + NULLS(9)
+        + ',[],null,null,-10621458850,null,null,1]')
+    assert cw.NEW_FILE_MIME["doc"] == cw.NEW_DOCUMENT_MIME

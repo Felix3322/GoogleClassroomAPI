@@ -25,7 +25,7 @@ from datetime import datetime
 from typing import Any, Optional, Sequence, Union
 
 from .web.classroom import (KIND_ANNOUNCEMENT, KIND_ASSIGNMENT, KIND_MATERIAL, KIND_QUESTION,
-                            NEW_DOCUMENT_MIME, STATE_PUBLISHED, ClassroomWeb, course_id_from_url,
+                            NEW_FILE_MIME, STATE_PUBLISHED, ClassroomWeb, course_id_from_url,
                             submission_file, submission_link)
 from .web.session import WebSession
 
@@ -367,6 +367,56 @@ class Classroom:
 
     # --- grading ------------------------------------------------------------------
 
+    def return_work_many(self, course_id: Id, item_id: Id, grades: dict) -> list[dict]:
+        """Return the work of several students on one item: ``{student_id: grade}``,
+        ``None`` for no grade. Returns the submissions.
+
+        This sends one request per student. The web app's single request for
+        several students could not be captured (the test class has one student),
+        and a request with two entries for two different items was refused by
+        the server, so nothing of that kind is sent.
+        """
+        return [self._c.return_work(course_id, item_id, int(student), grade)
+                for student, grade in grades.items()]
+
+    # --- comments -----------------------------------------------------------------
+
+    def class_comments(self, course_id: Id, item_id: Id, *, include_deleted: bool = False) -> list[dict]:
+        """Comments under a post that the whole class sees, newest first:
+        ``[{comment_id, kind, author_id, text, created_ms, updated_ms, deleted, …}]``."""
+        return self._c.list_comments(course_id, item_id, include_deleted=include_deleted)
+
+    def add_class_comment(self, course_id: Id, item_id: Id, text: str) -> dict:
+        """Post a comment under an assignment, question or material, as yourself."""
+        return self._c.add_comment(course_id, item_id, text)
+
+    def private_comments(self, course_id: Id, item_id: Id, student_id: Optional[Id] = None, *,
+                         include_deleted: bool = False) -> list[dict]:
+        """The private comments between one student and the teachers on one piece of work,
+        newest first.
+
+        A teacher passes the student's id; a student leaves it out (it is their own work).
+        """
+        student = int(student_id) if student_id is not None else int(self._c.own_user_id())
+        return self._c.list_comments(course_id, item_id, student, include_deleted=include_deleted)
+
+    def add_private_comment(self, course_id: Id, item_id: Id, text: str,
+                            student_id: Optional[Id] = None) -> dict:
+        """Write a private comment on one student's work: as the teacher to that student
+        (``student_id``), or as the student to the teacher (leave ``student_id`` out)."""
+        student = int(student_id) if student_id is not None else int(self._c.own_user_id())
+        return self._c.add_comment(course_id, item_id, text, student)
+
+    def delete_class_comment(self, course_id: Id, item_id: Id, comment_id: Id) -> dict:
+        """Delete a class comment (your own; a teacher can delete anybody's)."""
+        return self._c.delete_comment(course_id, item_id, str(comment_id))
+
+    def delete_private_comment(self, course_id: Id, item_id: Id, comment_id: Id,
+                               student_id: Optional[Id] = None) -> dict:
+        """Delete a private comment. A teacher passes the id of the student whose work it is on."""
+        student = int(student_id) if student_id is not None else int(self._c.own_user_id())
+        return self._c.delete_comment(course_id, item_id, str(comment_id), student)
+
     def missing_work_grade(self, course_id: Id) -> dict:
         """``{enabled, percent}``: whether missing work gets a grade automatically."""
         return self._c.get_missing_work_grade(course_id)
@@ -443,9 +493,18 @@ class Classroom:
         what is attached is under ``attachments``."""
         return self._c.add_own_attachment(course_id, item_id, submission_link(url))
 
+    def add_new_file(self, course_id: Id, item_id: Id, kind: str = "doc") -> dict:
+        """Have Classroom create an empty Google file in your Drive and attach it to your work.
+
+        ``kind`` is ``"doc"``, ``"slides"``, ``"sheet"`` or ``"drawing"``.
+        """
+        if kind not in NEW_FILE_MIME:
+            raise ValueError(f"kind must be one of {sorted(NEW_FILE_MIME)}")
+        return self._c.add_own_attachment(course_id, item_id, submission_file(None, NEW_FILE_MIME[kind]))
+
     def add_new_doc(self, course_id: Id, item_id: Id) -> dict:
         """Have Classroom create an empty Google Doc in your Drive and attach it to your work."""
-        return self._c.add_own_attachment(course_id, item_id, submission_file(None, NEW_DOCUMENT_MIME))
+        return self.add_new_file(course_id, item_id, "doc")
 
     def add_drive_file(self, course_id: Id, item_id: Id, drive_id: str,
                        mime_type: Optional[str] = None) -> dict:
